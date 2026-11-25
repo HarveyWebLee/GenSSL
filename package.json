@@ -1,0 +1,26 @@
+{
+  "name": "genssl",
+  "private": true,
+  "version": "0.1.0",
+  "description": "局域网 HTTPS 自建 SSL 证书管理工具（前后端分离）",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "concurrently -n backend,frontend -c blue,green \"npm run start:dev -w backend\" \"npm run dev -w frontend\"",
+    "dev:backend": "npm run start:dev -w backend",
+    "dev:frontend": "npm run dev -w frontend",
+    "build": "npm run build -w backend && npm run build -w frontend",
+    "build:backend": "npm run build -w backend",
+    "build:frontend": "npm run build -w frontend",
+    "start:backend": "npm run start -w backend",
+    "test": "npm run test -w backend"
+  },
+  "devDependencies": {
+    "concurrently": "10.0.7"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
