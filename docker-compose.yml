@@ -1,0 +1,108 @@
+# GenSSL 本地基础设施：PostgreSQL + RustFS（S3 兼容对象存储）
+# 启动：在项目根目录执行  docker compose up -d
+# Windows / Linux / macOS 均适用（需已安装 Docker Desktop 或 Docker Engine + Compose）
+#
+# 端口：
+#   PostgreSQL  19666  ->  5432
+#   RustFS S3 API  19701  ->  9000
+#   RustFS Console 19702  ->  9001
+#
+# 本地开发不要为 RustFS 启用 TLS（不要设置 RUSTFS_TLS_PATH），以免和本项目证书流程缠在一起。
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: genssl-postgres
+    ports:
+      - "19666:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-genssl}
+      POSTGRES_USER: ${POSTGRES_USER:-genssl}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-genssl}
+    volumes:
+      - genssl_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - genssl-network
+    restart: unless-stopped
+
+  rustfs-volume-permission-helper:
+    image: alpine:3.20
+    container_name: genssl-rustfs-perms
+    volumes:
+      - genssl_rustfs_data_0:/data/rustfs0
+      - genssl_rustfs_data_1:/data/rustfs1
+      - genssl_rustfs_data_2:/data/rustfs2
+      - genssl_rustfs_data_3:/data/rustfs3
+      - genssl_rustfs_logs:/app/logs
+    command: >
+      sh -c "
+        chown -R 10001:10001 /data/rustfs0 /data/rustfs1 /data/rustfs2 /data/rustfs3 /app/logs &&
+        echo 'Volume permissions fixed (10001:10001)' &&
+        exit 0
+      "
+    restart: "no"
+    networks:
+      - genssl-network
+
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: genssl-rustfs
+    depends_on:
+      rustfs-volume-permission-helper:
+        condition: service_completed_successfully
+    security_opt:
+      - "no-new-privileges:true"
+    ports:
+      - "19701:9000"
+      - "19702:9001"
+    environment:
+      RUSTFS_VOLUMES: /data/rustfs{0...3}
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CONSOLE_CORS_ALLOWED_ORIGINS: "*"
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-rustfsadmin}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-rustfsadmin}
+      RUSTFS_OBS_LOGGER_LEVEL: info
+      RUSTFS_OBS_LOG_DIRECTORY: /app/logs
+      # 单机本地测试选项（官方支持）。不要对公网暴露本服务。
+      RUSTFS_UNSAFE_BYPASS_DISK_CHECK: ${RUSTFS_UNSAFE_BYPASS_DISK_CHECK:-true}
+    volumes:
+      - genssl_rustfs_data_0:/data/rustfs0
+      - genssl_rustfs_data_1:/data/rustfs1
+      - genssl_rustfs_data_2:/data/rustfs2
+      - genssl_rustfs_data_3:/data/rustfs3
+      - genssl_rustfs_logs:/app/logs
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "sh",
+          "-ec",
+          "curl -fsS http://127.0.0.1:9000/health && curl -fsS http://127.0.0.1:9001/rustfs/console/health",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - genssl-network
+    restart: unless-stopped
+
+networks:
+  genssl-network:
+    name: genssl-network
+
+volumes:
+  genssl_pg_data:
+  genssl_rustfs_data_0:
+  genssl_rustfs_data_1:
+  genssl_rustfs_data_2:
+  genssl_rustfs_data_3:
+  genssl_rustfs_logs:

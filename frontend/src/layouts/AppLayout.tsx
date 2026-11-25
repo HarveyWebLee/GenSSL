@@ -7,6 +7,8 @@ import {
   ClusterOutlined,
   CloudServerOutlined,
   QuestionCircleOutlined,
+  UploadOutlined,
+  HddOutlined,
 } from '@ant-design/icons';
 
 const { Sider, Header, Content } = Layout;
@@ -16,6 +18,8 @@ const menuItems = [
   { key: '/ca', icon: <SafetyCertificateOutlined />, label: '根 CA' },
   { key: '/issue', icon: <FileAddOutlined />, label: '签发证书' },
   { key: '/certs', icon: <ClusterOutlined />, label: '证书管理' },
+  { key: '/servers', icon: <HddOutlined />, label: '服务器与路径' },
+  { key: '/deploy', icon: <UploadOutlined />, label: '上传部署' },
   { key: '/nginx', icon: <CloudServerOutlined />, label: 'Nginx 配置' },
   { key: '/guide', icon: <QuestionCircleOutlined />, label: '客户端信任' },
 ];

@@ -75,6 +75,13 @@ export interface CertificateDownload {
   contentDisposition: string;
 }
 
+export interface CaSigningMaterial {
+  cert: forge.pki.Certificate;
+  key: forge.pki.rsa.PrivateKey;
+  certPem: string;
+}
+
+
 @Injectable()
 export class CaService {
   private readonly caDir: string;
@@ -105,6 +112,51 @@ export class CaService {
 
   hasCertificate(): boolean {
     return existsSync(this.getCertPath());
+  }
+
+
+  async isReady(): Promise<boolean> {
+    return this.hasCertificate() && existsSync(this.getKeyPath());
+  }
+
+  async loadSigningMaterial(): Promise<CaSigningMaterial> {
+    if (!(await this.isReady())) {
+      throw new NotFoundException(
+        '尚未创建完整的根 CA，无法签发服务器证书。请先创建根 CA。',
+      );
+    }
+
+    try {
+      const certPem = await readFile(this.getCertPath(), 'utf8');
+      const keyPem = await readFile(this.getKeyPath(), 'utf8');
+      return {
+        cert: forge.pki.certificateFromPem(certPem),
+        key: forge.pki.privateKeyFromPem(keyPem) as forge.pki.rsa.PrivateKey,
+        certPem,
+      };
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        throw error;
+      }
+      throw new InternalServerErrorException(
+        `根 CA 证书或私钥无法解析：${error instanceof Error ? error.message : '未知错误'}`,
+      );
+    }
+  }
+
+  async readCertificatePem(): Promise<string> {
+    if (!this.hasCertificate()) {
+      throw new NotFoundException('尚未创建根 CA。');
+    }
+    try {
+      return await readFile(this.getCertPath(), 'utf8');
+    } catch {
+      throw new InternalServerErrorException('无法读取根证书文件，请检查文件权限后重试。');
+    }
+  }
+
+  async getPublicFileName(): Promise<string> {
+    return this.resolvePublicFileName();
   }
 
   async getStatus(): Promise<CaStatus> {
