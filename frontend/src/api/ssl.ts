@@ -1,17 +1,21 @@
 import axios from 'axios';
 import { getApiErrorMessage, http } from './http';
 import type {
+  ArchiveLibrary,
   CaCertFormat,
-  CaStatus,
+  CaListResponse,
   CertificateDetail,
   CertificateSummary,
   CreateCaPayload,
   DeployRecord,
   GenerateNginxPayload,
   IssueCertPayload,
+  NginxConfigResult,
   OverviewData,
+  RootCaSummary,
   ServerRecord,
   TargetFileList,
+  WindowsTrustGuide,
 } from './types';
 
 export function getHealth() {
@@ -23,25 +27,42 @@ export async function getOverview(): Promise<OverviewData> {
   return data;
 }
 
-export async function getCaStatus(): Promise<CaStatus> {
-  const { data } = await http.get<CaStatus>('/ca');
+export async function listCas(): Promise<CaListResponse> {
+  const { data } = await http.get<CaListResponse>('/ca');
   return data;
 }
 
-export async function createCa(payload: CreateCaPayload): Promise<CaStatus> {
+export async function getCa(id: string): Promise<RootCaSummary> {
+  const { data } = await http.get<RootCaSummary>(`/ca/${id}`);
+  return data;
+}
+
+export async function createCa(payload: CreateCaPayload): Promise<RootCaSummary> {
   const timeout = payload.keySize === 8192 ? 300_000 : 120_000;
-  const { data } = await http.post<CaStatus>('/ca', payload, { timeout });
+  const { data } = await http.post<RootCaSummary>('/ca', payload, { timeout });
   return data;
 }
 
-export async function downloadCaCert(options?: {
-  filename?: string;
-  format?: CaCertFormat;
-}): Promise<string> {
-  return downloadBinary('/ca/download', {
-    filename: options?.filename,
-    format: options?.format,
-  }, 'Root-CA.crt', '下载根证书失败');
+export async function retireCa(id: string): Promise<RootCaSummary> {
+  const { data } = await http.post<RootCaSummary>(`/ca/${id}/retire`);
+  return data;
+}
+
+export async function archiveCa(id: string): Promise<RootCaSummary> {
+  const { data } = await http.post<RootCaSummary>(`/ca/${id}/archive`, {}, { timeout: 60_000 });
+  return data;
+}
+
+export async function downloadCaCert(
+  id: string,
+  options?: { filename?: string; format?: CaCertFormat },
+): Promise<string> {
+  return downloadBinary(
+    `/ca/${id}/download`,
+    { filename: options?.filename, format: options?.format },
+    'Root-CA.crt',
+    '下载根证书失败',
+  );
 }
 
 export async function listCerts(): Promise<{ items: CertificateSummary[] }> {
@@ -55,13 +76,13 @@ export async function issueCert(payload: IssueCertPayload): Promise<CertificateD
   return data;
 }
 
-export async function getCertDetail(name: string): Promise<CertificateDetail> {
-  const { data } = await http.get<CertificateDetail>(`/certs/${encodeURIComponent(name)}`);
+export async function getCertDetail(id: string): Promise<CertificateDetail> {
+  const { data } = await http.get<CertificateDetail>(`/certs/${encodeURIComponent(id)}`);
   return data;
 }
 
 export async function downloadIssuedCert(options: {
-  name: string;
+  id: string;
   part?: 'bundle' | 'cert' | 'key';
   filename?: string;
   format?: string;
@@ -69,7 +90,7 @@ export async function downloadIssuedCert(options: {
   const fallback =
     options.part === 'key' ? 'server.key' : options.part === 'cert' ? 'server.crt' : 'server-nginx.zip';
   return downloadBinary(
-    `/certs/${encodeURIComponent(options.name)}/download`,
+    `/certs/${encodeURIComponent(options.id)}/download`,
     { part: options.part, filename: options.filename, format: options.format },
     fallback,
     '下载证书失败',
@@ -145,16 +166,25 @@ export async function listTargetFiles(serverId: string, pathId: string): Promise
   return data;
 }
 
+export async function getArchiveLibrary(): Promise<ArchiveLibrary> {
+  const { data } = await http.get<ArchiveLibrary>('/archive');
+  return data;
+}
+
 export async function downloadStoredObject(key: string): Promise<string> {
   return downloadBinary('/storage/objects', { key }, key.split('/').pop() || 'download', '下载文件失败');
 }
 
-export function generateNginxConfig(payload: GenerateNginxPayload) {
-  return http.post('/nginx/config', payload);
+export async function generateNginxConfig(payload: GenerateNginxPayload): Promise<NginxConfigResult> {
+  const { data } = await http.post<NginxConfigResult>('/nginx/config', payload);
+  return data;
 }
 
-export function getWindowsTrustGuide() {
-  return http.get('/guides/windows-trust');
+export async function getWindowsTrustGuide(caId?: string): Promise<WindowsTrustGuide> {
+  const { data } = await http.get<WindowsTrustGuide>('/guides/windows-trust', {
+    params: caId ? { caId } : undefined,
+  });
+  return data;
 }
 
 async function downloadBinary(

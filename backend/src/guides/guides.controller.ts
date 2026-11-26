@@ -1,4 +1,4 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Query } from '@nestjs/common';
 import { GuidesService } from './guides.service';
 
 @Controller('guides')
@@ -6,7 +6,7 @@ export class GuidesController {
   constructor(private readonly guidesService: GuidesService) {}
 
   @Get('windows-trust')
-  getWindowsTrustGuide() {
-    return this.guidesService.getWindowsTrustGuide();
+  getWindowsTrustGuide(@Query('caId') caId?: string) {
+    return this.guidesService.getWindowsTrustGuide(caId);
   }
 }

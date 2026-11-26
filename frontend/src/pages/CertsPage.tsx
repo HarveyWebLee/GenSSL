@@ -13,20 +13,23 @@ import {
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useSearchParams } from 'react-router-dom';
+import { PlusOutlined } from '@ant-design/icons';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import dayjs from 'dayjs';
 import { getApiErrorMessage } from '../api/http';
 import { downloadIssuedCert, getCertDetail, listCerts } from '../api/ssl';
 import type { CertificateDetail, CertificateSummary } from '../api/types';
+import { PageHeader } from '../components/PageHeader';
 
 function ValidityTag({ ok, label }: { ok: boolean; label: string }) {
-  return <Tag color={ok ? 'green' : 'red'}>{label}</Tag>;
+  return <Tag color={ok ? 'success' : 'error'}>{label}</Tag>;
 }
 
 export function CertsPage() {
   const { message, modal } = App.useApp();
+  const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
-  const selectedName = params.get('name');
+  const selectedId = params.get('id');
   const [detail, setDetail] = useState<CertificateDetail | null>(null);
 
   const query = useQuery({
@@ -34,10 +37,12 @@ export function CertsPage() {
     queryFn: listCerts,
   });
 
+  const items = query.data?.items ?? [];
+
   const detailQuery = useQuery({
-    queryKey: ['certs', selectedName],
-    queryFn: () => getCertDetail(selectedName as string),
-    enabled: Boolean(selectedName),
+    queryKey: ['certs', selectedId],
+    queryFn: () => getCertDetail(selectedId as string),
+    enabled: Boolean(selectedId),
   });
 
   useEffect(() => {
@@ -47,53 +52,75 @@ export function CertsPage() {
   }, [detailQuery.data]);
 
   const download = useMutation({
-    mutationFn: (options: { name: string; part: 'bundle' | 'cert' | 'key' }) =>
+    mutationFn: (options: { id: string; part: 'bundle' | 'cert' | 'key' }) =>
       downloadIssuedCert(options),
     onSuccess: (filename) => message.success(`已开始下载 ${filename}`),
     onError: (error) => message.error(error instanceof Error ? error.message : '下载失败'),
   });
 
-  const confirmKeyDownload = (name: string) => {
+  const confirmKeyDownload = (id: string) => {
     modal.confirm({
       title: '下载服务器私钥？',
       content:
-        '此文件是该服务器的 Nginx 私钥（server.key），只用于部署到对应服务器，不要分发给客户端，也不要与 rootCA.key 混淆。根 CA 私钥不会提供下载。',
+        '此文件是该服务器的 Nginx 私钥，只用于部署到对应服务器，不要分发给客户端，也不要与 rootCA.key 混淆。根 CA 私钥不会提供下载。',
       okText: '我明白，继续下载',
       cancelText: '取消',
-      onOk: () => download.mutateAsync({ name, part: 'key' }),
+      onOk: () => download.mutateAsync({ id, part: 'key' }),
     });
   };
 
   const columns: ColumnsType<CertificateSummary> = [
-    { title: '名称', dataIndex: 'name', ellipsis: true },
-    { title: 'CN', dataIndex: 'commonName', ellipsis: true },
     {
-      title: 'IP SAN',
+      title: '状态',
+      dataIndex: 'statusLabel',
+      render: (label: string, row) => (
+        <Tag color={row.status === 'valid' ? 'success' : row.status === 'needs_reissue' ? 'warning' : 'default'}>
+          {label}
+        </Tag>
+      ),
+    },
+    {
+      title: '所属根证书',
+      dataIndex: ['ca', 'name'],
+      render: (_: string, row) => (
+        <div>
+          <div>{row.ca.name || '—'}</div>
+          {row.ca.status === 'retired' ? <Tag>根已停用</Tag> : null}
+        </div>
+      ),
+    },
+    {
+      title: '绑定的 IP',
       dataIndex: 'ips',
-      render: (ips: string[]) => ips.join(', '),
+      render: (ips: string[], row) => (
+        <div>
+          <div>{ips.join(', ') || '—'}</div>
+          {row.dnsNames?.length ? (
+            <Typography.Text type="secondary">{row.dnsNames.join(', ')}</Typography.Text>
+          ) : null}
+        </div>
+      ),
+    },
+    {
+      title: '下载文件名',
+      dataIndex: 'publicFileName',
     },
     {
       title: '有效期至',
       dataIndex: 'notAfter',
+      width: 140,
       render: (value: string) => dayjs(value).format('YYYY-MM-DD'),
-    },
-    {
-      title: '公共文件名',
-      dataIndex: 'publicFileName',
     },
     {
       title: '操作',
       key: 'actions',
+      width: 180,
       render: (_, row) => (
         <Space>
-          <Button type="link" size="small" onClick={() => setParams({ name: row.name })}>
+          <Button type="link" size="small" onClick={() => setParams({ id: row.id })}>
             详情
           </Button>
-          <Button
-            type="link"
-            size="small"
-            onClick={() => download.mutate({ name: row.name, part: 'bundle' })}
-          >
+          <Button type="link" size="small" onClick={() => download.mutate({ id: row.id, part: 'bundle' })}>
             部署包
           </Button>
         </Space>
@@ -102,37 +129,48 @@ export function CertsPage() {
   ];
 
   return (
-    <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <Typography.Title level={3} style={{ margin: 0 }}>
-        证书管理
-      </Typography.Title>
-      <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
-        查看已签发证书的详情与校验结果，并本地下载 Nginx 部署所需的 server 证书和私钥。下载包绝不包含 rootCA.key。
-      </Typography.Paragraph>
+    <div className="page-stack">
+      <PageHeader
+        title="证书列表"
+        description="查看已签发证书及其所属根、状态（停用根后会显示为需重签），并下载供 Nginx 使用的证书和私钥。下载包绝不包含 rootCA.key。"
+        extra={
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/issue')}>
+            签发新证书
+          </Button>
+        }
+      />
 
-      <Card>
+      <Card className="surface-card">
         {query.isError ? (
           <Alert
             type="error"
             showIcon
-            message="无法获取证书列表"
+            title="无法获取证书列表"
             description={getApiErrorMessage(query.error, '请确认后端与数据库已启动。')}
           />
+        ) : !query.isLoading && items.length === 0 ? (
+          <div className="empty-panel">
+            <h4>还没有签发过证书</h4>
+            <p>先确认根 CA 已创建，然后为服务器 IP 签发证书。列表名和下载文件名都会按 IP 自动生成。</p>
+            <Button type="primary" onClick={() => navigate('/issue')}>
+              去签发证书
+            </Button>
+          </div>
         ) : (
           <Table
             rowKey="id"
             loading={query.isLoading}
             columns={columns}
-            dataSource={query.data?.items ?? []}
+            dataSource={items}
             pagination={false}
           />
         )}
       </Card>
 
       <Drawer
-        title={detail ? `证书详情：${detail.name}` : '证书详情'}
-        open={Boolean(selectedName)}
-        width={720}
+        title={detail ? `证书详情：${detail.ips.join(', ') || detail.name}` : '证书详情'}
+        open={Boolean(selectedId)}
+        size={720}
         onClose={() => {
           setParams({});
           setDetail(null);
@@ -142,15 +180,15 @@ export function CertsPage() {
           <Alert
             type="error"
             showIcon
-            message="无法读取证书详情"
+            title="无法读取证书详情"
             description={getApiErrorMessage(detailQuery.error, '请稍后重试。')}
           />
         ) : detail ? (
-          <Space direction="vertical" size={16} style={{ width: '100%' }}>
+          <Space orientation="vertical" size={16} style={{ width: '100%' }}>
             <Alert
               type={detail.verification.ok ? 'success' : 'warning'}
               showIcon
-              message={detail.verification.ok ? '校验通过' : '校验存在问题'}
+              title={detail.verification.ok ? '校验通过' : '校验存在问题'}
               description={
                 <Space wrap>
                   <ValidityTag ok={detail.verification.chainValid} label="证书链" />
@@ -158,20 +196,21 @@ export function CertsPage() {
                   <ValidityTag ok={detail.verification.periodValid} label="有效期" />
                   <ValidityTag ok={detail.verification.keyMatch} label="私钥匹配" />
                   {detail.verification.messages.length > 0 ? (
-                    <Typography.Text type="danger">
-                      {detail.verification.messages.join('；')}
-                    </Typography.Text>
+                    <Typography.Text type="danger">{detail.verification.messages.join('；')}</Typography.Text>
                   ) : null}
                 </Space>
               }
             />
             <Card size="small" title="Subject Alternative Name">
-              <pre style={{ margin: 0, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' }}>
+              <pre className="san-preview" style={{ margin: 0 }}>
                 {detail.sanDisplay}
               </pre>
             </Card>
             <Descriptions bordered size="small" column={1}>
-              <Descriptions.Item label="通用名称">{detail.commonName}</Descriptions.Item>
+              <Descriptions.Item label="状态">{detail.statusLabel}</Descriptions.Item>
+              <Descriptions.Item label="所属根证书">{detail.ca.name}{detail.ca.status === 'retired' ? '（已停用）' : ''}</Descriptions.Item>
+              <Descriptions.Item label="列表记录名">{detail.name}</Descriptions.Item>
+              <Descriptions.Item label="证书主体名称">{detail.commonName}</Descriptions.Item>
               <Descriptions.Item label="序列号">{detail.serialNumber}</Descriptions.Item>
               <Descriptions.Item label="指纹（SHA-256）">{detail.fingerprintSha256}</Descriptions.Item>
               <Descriptions.Item label="有效期">
@@ -180,27 +219,25 @@ export function CertsPage() {
                 {dayjs(detail.notAfter).format('YYYY-MM-DD HH:mm:ss')}
               </Descriptions.Item>
               <Descriptions.Item label="密钥">{`RSA ${detail.publicKeyBits}`}</Descriptions.Item>
-              <Descriptions.Item label="公共文件名">{detail.publicFileName}</Descriptions.Item>
+              <Descriptions.Item label="证书文件名">{detail.publicFileName}</Descriptions.Item>
               <Descriptions.Item label="私钥文件名">{detail.keyFileName}</Descriptions.Item>
             </Descriptions>
             <Space wrap>
-              <Button onClick={() => download.mutate({ name: detail.name, part: 'cert' })}>
-                下载证书
-              </Button>
-              <Button onClick={() => confirmKeyDownload(detail.name)}>下载私钥</Button>
-              <Button type="primary" onClick={() => download.mutate({ name: detail.name, part: 'bundle' })}>
+              <Button onClick={() => download.mutate({ id: detail.id, part: 'cert' })}>下载证书</Button>
+              <Button onClick={() => confirmKeyDownload(detail.id)}>下载私钥</Button>
+              <Button type="primary" onClick={() => download.mutate({ id: detail.id, part: 'bundle' })}>
                 下载 Nginx 部署包
               </Button>
             </Space>
             <Alert
               type="warning"
               showIcon
-              message="私钥使用提醒"
-              description="server.key 只用于部署到对应 Nginx 服务器，不要分发给客户端。rootCA.key 不会出现在任何下载中。"
+              title="私钥使用提醒"
+              description="服务器私钥只用于部署到对应 Nginx，不要分发给客户端。rootCA.key 不会出现在任何下载中。"
             />
           </Space>
         ) : null}
       </Drawer>
-    </Space>
+    </div>
   );
 }

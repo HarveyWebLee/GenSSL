@@ -1,0 +1,7 @@
+---
+description: 使用 Ant Design 组件前先查阅项目 antd MCP 文档
+globs: frontend/**/*.{tsx,ts,jsx,js}
+alwaysApply: false
+---
+
+在编写或修改 GenSSL 前端的 Ant Design 组件前，先通过项目 `.cursor/mcp.json` 中的 `antd` MCP 查阅对应组件文档，再按文档里的现行 API 实现。本项目使用 Ant Design 6.7.2，不要使用已弃用的属性（例如 Spin 的 `tip`、Drawer 的 `width`/`destroyOnClose`、Space 的 `direction`、Alert 的 `message`、Input 的 `addonAfter`）。

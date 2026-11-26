@@ -141,7 +141,25 @@ export class RustfsService implements OnModuleInit {
     return items;
   }
 
-  async getObjectStream(objectKey: string): Promise<{
+  async getObjectBuffer(objectKey: string): Promise<{ buffer: Buffer; contentType?: string; key: string }> {
+    const result = await this.getObjectStream(objectKey);
+    const chunks: Buffer[] = [];
+    for await (const chunk of result.stream) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return {
+      buffer: Buffer.concat(chunks),
+      contentType: result.contentType,
+      key: result.key,
+    };
+  }
+
+  async getObjectText(objectKey: string): Promise<string> {
+    const { buffer } = await this.getObjectBuffer(objectKey);
+    return buffer.toString('utf8');
+  }
+
+    async getObjectStream(objectKey: string): Promise<{
     stream: Readable;
     contentType?: string;
     contentLength?: number;

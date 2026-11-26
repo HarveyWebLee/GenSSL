@@ -8,6 +8,7 @@ import {
   Col,
   DatePicker,
   Descriptions,
+  Drawer,
   Form,
   Input,
   InputNumber,
@@ -15,29 +16,33 @@ import {
   Select,
   Space,
   Spin,
+  Table,
   Tag,
   Typography,
 } from 'antd';
-import { DownloadOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
+import { DownloadOutlined, PlusOutlined } from '@ant-design/icons';
 import dayjs, { type Dayjs } from 'dayjs';
+import { useSearchParams } from 'react-router-dom';
 import { getApiErrorMessage } from '../api/http';
-import { createCa, downloadCaCert, getCaStatus } from '../api/ssl';
-import {
-  isCaDetails,
-  type CaCertFormat,
-  type CaDetails,
-  type CaHashAlgorithm,
-  type CaKeySize,
-  type CreateCaPayload,
-} from '../api/types';
+import { archiveCa, createCa, downloadCaCert, listCas, retireCa } from '../api/ssl';
+import type { CaCertFormat, CaHashAlgorithm, CaKeySize, CreateCaPayload, RootCaSummary } from '../api/types';
+import { AdvancedOptions } from '../components/AdvancedOptions';
+import { FieldHint } from '../components/FieldHint';
+import { NamePreview } from '../components/NamePreview';
+import { NextStepCard } from '../components/NextStepCard';
+import { PageHeader } from '../components/PageHeader';
+import { WorkflowBar } from '../components/WorkflowBar';
+import { suggestCaPublicFileName, withCertExtension } from '../utils/names';
+import { MAX_CERT_VALIDITY_DAYS } from '../utils/cert-validity';
 
 interface CaFormValues {
+  name: string;
   country: string;
   stateOrProvince?: string;
   locality?: string;
-  organization: string;
-  organizationalUnit: string;
-  commonName: string;
+  organization?: string;
+  organizationalUnit?: string;
+  commonName?: string;
   emailAddress?: string;
   keySize: CaKeySize;
   days: number;
@@ -48,10 +53,8 @@ interface CaFormValues {
 }
 
 const DEFAULT_VALUES: CaFormValues = {
+  name: '',
   country: 'CN',
-  organization: 'MyCompany',
-  organizationalUnit: 'IT',
-  commonName: 'MyCompany Local Root CA',
   keySize: 4096,
   days: 3650,
   hashAlgorithm: 'sha256',
@@ -64,283 +67,385 @@ const KEY_USAGE_LABELS: Record<string, string> = {
   keyEncipherment: '密钥加密',
 };
 
-function buildPayload(values: CaFormValues, overwrite?: boolean): CreateCaPayload {
+function buildPayload(values: CaFormValues): CreateCaPayload {
   const payload: CreateCaPayload = {
-    country: values.country.trim().toUpperCase(),
-    organization: values.organization.trim(),
-    organizationalUnit: values.organizationalUnit.trim(),
-    commonName: values.commonName.trim(),
+    name: values.name.trim(),
     keySize: values.keySize,
     days: values.days,
     hashAlgorithm: values.hashAlgorithm,
   };
-
-  if (values.stateOrProvince?.trim()) {
-    payload.stateOrProvince = values.stateOrProvince.trim();
-  }
-  if (values.locality?.trim()) {
-    payload.locality = values.locality.trim();
-  }
-  if (values.emailAddress?.trim()) {
-    payload.emailAddress = values.emailAddress.trim();
-  }
-  if (values.notBefore) {
-    payload.notBefore = values.notBefore.toISOString();
-  }
-  if (values.pathLenConstraint !== undefined && values.pathLenConstraint !== null) {
-    payload.pathLenConstraint = values.pathLenConstraint;
-  }
+  if (values.country?.trim()) payload.country = values.country.trim().toUpperCase();
+  if (values.stateOrProvince?.trim()) payload.stateOrProvince = values.stateOrProvince.trim();
+  if (values.locality?.trim()) payload.locality = values.locality.trim();
+  if (values.organization?.trim()) payload.organization = values.organization.trim();
+  if (values.organizationalUnit?.trim()) payload.organizationalUnit = values.organizationalUnit.trim();
+  if (values.commonName?.trim()) payload.commonName = values.commonName.trim();
+  if (values.emailAddress?.trim()) payload.emailAddress = values.emailAddress.trim();
+  if (values.notBefore) payload.notBefore = values.notBefore.toISOString();
+  if (typeof values.pathLenConstraint === 'number') payload.pathLenConstraint = values.pathLenConstraint;
   if (values.publicFileName?.trim()) {
-    payload.publicFileName = values.publicFileName.trim();
-  }
-  if (overwrite) {
-    payload.overwrite = true;
+    payload.publicFileName = withCertExtension(values.publicFileName, values.name.trim() || 'Root-CA');
   }
   return payload;
 }
 
-function detailsToFormValues(details: CaDetails): CaFormValues {
-  const durationDays = Math.max(
-    1,
-    Math.round(
-      (new Date(details.notAfter).getTime() - new Date(details.notBefore).getTime()) /
-        (24 * 60 * 60 * 1000),
-    ),
-  );
+export function RootCaPage() {
+  const { message, modal } = App.useApp();
+  const queryClient = useQueryClient();
+  const [params, setParams] = useSearchParams();
+  const selectedId = params.get('id');
+  const [creating, setCreating] = useState(false);
+  const [form] = Form.useForm<CaFormValues>();
 
-  const keySize: CaKeySize =
-    details.publicKeyBits === 2048 || details.publicKeyBits === 8192
-      ? details.publicKeyBits
-      : 4096;
+  const query = useQuery({ queryKey: ['cas'], queryFn: listCas });
+  const items = query.data?.items ?? [];
+  const selected = items.find((item) => item.id === selectedId) ?? null;
 
-  const hashAlgorithm: CaHashAlgorithm = details.signatureAlgorithm.includes('sha512')
-    ? 'sha512'
-    : details.signatureAlgorithm.includes('sha384')
-      ? 'sha384'
-      : 'sha256';
+  const createMutation = useMutation({
+    mutationFn: createCa,
+    onSuccess: async (created) => {
+      await queryClient.invalidateQueries({ queryKey: ['cas'] });
+      await queryClient.invalidateQueries({ queryKey: ['overview'] });
+      message.success(
+        created.archive.uploaded
+          ? '根证书已创建，公钥已写入证书库。私钥只保存在数据库中。'
+          : '根证书已创建。私钥只保存在数据库中。证书库暂不可用，可稍后在详情中重试入库。',
+      );
+      setCreating(false);
+      form.resetFields();
+      setParams({ id: created.id });
+    },
+    onError: (error) => message.error(getApiErrorMessage(error, '创建根证书失败')),
+  });
 
-  return {
-    country: details.subject.country ?? 'CN',
-    stateOrProvince: details.subject.stateOrProvince,
-    locality: details.subject.locality,
-    organization: details.subject.organization ?? 'MyCompany',
-    organizationalUnit: details.subject.organizationalUnit ?? 'IT',
-    commonName: details.subject.commonName ?? 'MyCompany Local Root CA',
-    emailAddress: details.subject.emailAddress,
-    keySize,
-    days: Math.min(3650, durationDays),
-    hashAlgorithm,
-    pathLenConstraint: details.pathLenConstraint,
-    publicFileName: details.publicFileName,
+  const retireMutation = useMutation({
+    mutationFn: retireCa,
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['cas'] });
+      await queryClient.invalidateQueries({ queryKey: ['certs'] });
+      await queryClient.invalidateQueries({ queryKey: ['overview'] });
+      message.success('该根证书已停用。它签过的服务器证书将显示为失效、需要重签。私钥和历史仍保留。');
+    },
+    onError: (error) => message.error(getApiErrorMessage(error, '停用失败')),
+  });
+
+  const archiveMutation = useMutation({
+    mutationFn: archiveCa,
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['cas'] });
+      await queryClient.invalidateQueries({ queryKey: ['overview'] });
+      await queryClient.invalidateQueries({ queryKey: ['archive'] });
+      message.success('根证书公钥已上传到证书库。私钥不会上传。');
+    },
+    onError: (error) => message.error(getApiErrorMessage(error, '上传到证书库失败')),
+  });
+
+  const confirmRetire = (row: RootCaSummary) => {
+    modal.confirm({
+      title: `停用根证书「${row.name}」？`,
+      content:
+        '停用后不能再用它签发新的服务器证书，它已经签出的证书会显示为「已失效（需重签）」。私钥、历史记录和证书库中的公钥都会保留，直到客户端和 Nginx 都切走后再自行决定如何处理。这不是覆盖或删除。',
+      okText: '确认停用',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: () => retireMutation.mutateAsync(row.id),
+    });
   };
+
+  return (
+    <div className="page-stack">
+      <PageHeader
+        title="根 CA"
+        description="可以创建多棵根证书，用于轮换。每张服务器证书都归属于签发它的那棵根。根 CA 私钥只保存在数据库中，不会上传到 RustFS，也不会提供下载。"
+        extra={
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreating(true)}>
+            创建根证书
+          </Button>
+        }
+      />
+      <WorkflowBar current="ca" />
+
+      {query.isLoading ? (
+        <Card>
+          <Spin description="正在读取根证书…">
+            <div style={{ minHeight: 120 }} />
+          </Spin>
+        </Card>
+      ) : query.isError ? (
+        <Alert type="error" showIcon title="无法读取根证书列表" description={getApiErrorMessage(query.error, '请稍后重试。')} />
+      ) : (
+        <Card className="surface-card">
+          <Table
+            rowKey="id"
+            dataSource={items}
+            pagination={false}
+            locale={{ emptyText: '还没有根证书。先创建一个，才能签发服务器证书。' }}
+            columns={[
+              { title: '根证书名称', dataIndex: 'name' },
+              { title: '主体 CN', dataIndex: 'commonName' },
+              {
+                title: '状态',
+                dataIndex: 'status',
+                render: (status: string) =>
+                  status === 'active' ? <Tag color="success">启用中</Tag> : <Tag>已停用</Tag>,
+              },
+              { title: '下属证书', dataIndex: 'certificateCount' },
+              { title: '需重签', dataIndex: 'needsReissueCount' },
+              {
+                title: '证书库',
+                render: (_, row) =>
+                  row.archive.uploaded ? <Tag color="blue">已入库</Tag> : <Tag>未入库</Tag>,
+              },
+              {
+                title: '有效期至',
+                dataIndex: 'notAfter',
+                render: (value: string) => dayjs(value).format('YYYY-MM-DD'),
+              },
+            ]}
+            onRow={(row) => ({
+              onClick: () => setParams({ id: row.id }),
+              style: { cursor: 'pointer' },
+            })}
+          />
+        </Card>
+      )}
+
+      <Drawer
+        title="创建根证书"
+        size={720}
+        open={creating}
+        onClose={() => setCreating(false)}
+        destroyOnHidden
+      >
+        <CaCreateForm form={form} loading={createMutation.isPending} onSubmit={(values) => createMutation.mutate(buildPayload(values))} />
+      </Drawer>
+
+      <Drawer
+        title={selected ? selected.name : '根证书详情'}
+        size={780}
+        open={Boolean(selected)}
+        onClose={() => setParams({})}
+      >
+        {selected ? (
+          <Space orientation="vertical" size={16} style={{ width: '100%' }}>
+            {selected.status === 'retired' ? (
+              <Alert
+                type="warning"
+                showIcon
+                title="此根证书已停用"
+                description={`停用时间：${dayjs(selected.retiredAt).format('YYYY-MM-DD HH:mm')}。不能再签发新证书。已有 ${selected.needsReissueCount} 张服务器证书需要改用其他根重新签发。私钥仍保留在数据库中。`}
+              />
+            ) : null}
+            <CaDetailsView details={selected} />
+            <CaDownloadPanel details={selected} />
+            <Card className="surface-card" title="证书库（管理档案）">
+              <Space orientation="vertical" style={{ width: '100%' }}>
+                <Alert
+                  type="info"
+                  showIcon
+                  title="这里上传的是根证书公钥 rootCA.crt，进入证书库 archive/cas/<id>/，不是部署到某台服务器的 cert 目录。"
+                  description="根 CA 私钥不会上传。"
+                />
+                {selected.archive.uploaded ? (
+                  <Typography.Text>
+                    已入库：<code>{selected.archive.objectKey}</code>
+                  </Typography.Text>
+                ) : (
+                  <Typography.Text type="secondary">尚未写入证书库。</Typography.Text>
+                )}
+                <Button onClick={() => archiveMutation.mutate(selected.id)} loading={archiveMutation.isPending}>
+                  {selected.archive.uploaded ? '重新上传到证书库' : '上传到证书库'}
+                </Button>
+              </Space>
+            </Card>
+            {selected.status === 'active' ? (
+              <Button danger onClick={() => confirmRetire(selected)} loading={retireMutation.isPending}>
+                停用此根证书
+              </Button>
+            ) : null}
+            {selected.status === 'active' ? <NextStepCard after="ca" /> : null}
+          </Space>
+        ) : null}
+      </Drawer>
+    </div>
+  );
 }
 
 function CaCreateForm({
-  initialValues,
-  submitText,
-  danger,
+  form,
   loading,
   onSubmit,
 }: {
-  initialValues: CaFormValues;
-  submitText: string;
-  danger?: boolean;
+  form: ReturnType<typeof Form.useForm<CaFormValues>>[0];
   loading: boolean;
   onSubmit: (values: CaFormValues) => void;
 }) {
-  const [form] = Form.useForm<CaFormValues>();
-
-  useEffect(() => {
-    form.setFieldsValue(initialValues);
-  }, [form, initialValues]);
+  const name = Form.useWatch('name', form) ?? '';
+  const commonName = Form.useWatch('commonName', form);
+  const publicFileName = Form.useWatch('publicFileName', form);
+  const previewName = useMemo(
+    () =>
+      publicFileName?.trim()
+        ? withCertExtension(publicFileName, name || 'Root-CA')
+        : suggestCaPublicFileName(commonName || name),
+    [name, commonName, publicFileName],
+  );
 
   return (
     <Form
       form={form}
       layout="vertical"
-      initialValues={initialValues}
+      initialValues={DEFAULT_VALUES}
       onFinish={onSubmit}
-      disabled={loading}
     >
-      <Row gutter={16}>
-        <Col xs={24} md={8}>
-          <Form.Item
-            label="国家（C）"
-            name="country"
-            rules={[
-              { required: true, message: '请填写国家代码' },
-              { pattern: /^[A-Za-z]{2}$/, message: '国家代码必须是 2 位字母（ISO 3166-1）' },
-            ]}
-            normalize={(value: string) => (value ? value.toUpperCase() : value)}
-          >
-            <Input maxLength={2} placeholder="CN" />
-          </Form.Item>
-        </Col>
-        <Col xs={24} md={8}>
-          <Form.Item label="省 / 州（ST）" name="stateOrProvince">
-            <Input maxLength={128} placeholder="可选" />
-          </Form.Item>
-        </Col>
-        <Col xs={24} md={8}>
-          <Form.Item label="城市（L）" name="locality">
-            <Input maxLength={128} placeholder="可选" />
-          </Form.Item>
-        </Col>
-        <Col xs={24} md={8}>
-          <Form.Item label="组织（O）" name="organization">
-            <Input maxLength={64} placeholder="MyCompany" />
-          </Form.Item>
-        </Col>
-        <Col xs={24} md={8}>
-          <Form.Item label="组织单位（OU）" name="organizationalUnit">
-            <Input maxLength={64} placeholder="IT" />
-          </Form.Item>
-        </Col>
-        <Col xs={24} md={8}>
-          <Form.Item
-            label="通用名称（CN）"
-            name="commonName"
-            rules={[{ required: true, message: '请填写通用名称（CN）' }]}
-          >
-            <Input maxLength={128} placeholder="MyCompany Local Root CA" />
-          </Form.Item>
-        </Col>
-        <Col xs={24} md={8}>
-          <Form.Item
-            label="邮箱"
-            name="emailAddress"
-            rules={[{ type: 'email', message: '请输入有效的邮箱地址' }]}
-          >
-            <Input maxLength={128} placeholder="可选" />
-          </Form.Item>
-        </Col>
-        <Col xs={24} md={8}>
-          <Form.Item
-            label="密钥长度"
-            name="keySize"
-            extra="4096 位生成可能需要数十秒，8192 位可能需要数分钟。"
-            rules={[{ required: true, message: '请选择密钥长度' }]}
-          >
-            <Select
-              options={[
-                { value: 2048, label: '2048 位' },
-                { value: 4096, label: '4096 位（推荐）' },
-                { value: 8192, label: '8192 位（较慢）' },
-              ]}
-            />
-          </Form.Item>
-        </Col>
-        <Col xs={24} md={8}>
-          <Form.Item
-            label="有效期（天）"
-            name="days"
-            rules={[{ required: true, message: '请填写有效期' }]}
-          >
-            <InputNumber min={1} max={3650} style={{ width: '100%' }} />
-          </Form.Item>
-        </Col>
-        <Col xs={24} md={8}>
-          <Form.Item
-            label="生效时间"
-            name="notBefore"
-            extra="留空则使用当前时间。"
-          >
-            <DatePicker showTime style={{ width: '100%' }} placeholder="默认为现在" />
-          </Form.Item>
-        </Col>
-        <Col xs={24} md={8}>
-          <Form.Item
-            label="签名算法"
-            name="hashAlgorithm"
-            rules={[{ required: true, message: '请选择签名算法' }]}
-          >
-            <Select
-              options={[
-                { value: 'sha256', label: 'SHA-256' },
-                { value: 'sha384', label: 'SHA-384' },
-                { value: 'sha512', label: 'SHA-512' },
-              ]}
-            />
-          </Form.Item>
-        </Col>
-        <Col xs={24} md={8}>
-          <Form.Item
-            label="路径长度约束"
-            name="pathLenConstraint"
-            extra="可选。限制本 CA 下方还可有几级中间 CA，0 表示只能签发终端证书。"
-          >
-            <InputNumber min={0} style={{ width: '100%' }} placeholder="不设置" />
-          </Form.Item>
-        </Col>
-        <Col xs={24} md={16}>
-          <Form.Item
-            label="公共文件名"
-            name="publicFileName"
-            extra="可选。用于客户端安装和分发时的下载文件名，不填写则根据通用名称或「组织-Root-CA」自动生成，默认扩展名为 .crt。内部存储文件名仍为 rootCA.crt，不会改变。支持 .crt、.cer、.pem。"
-          >
-            <Input maxLength={200} placeholder="例如 MyCompany-Root-CA.crt" />
-          </Form.Item>
-        </Col>
-      </Row>
+      <Form.Item
+        label="根证书名称"
+        name="name"
+        rules={[{ required: true, message: '请填写根证书名称' }]}
+        extra={<FieldHint example="Lan-Root-CA">用于在本平台中区分不同的根证书，创建后不可与其他根重名。不填主体通用名称时，也会用作证书的 CN。</FieldHint>}
+      >
+        <Input maxLength={128} placeholder="例如 Lan-Root-CA" />
+      </Form.Item>
+      <NamePreview
+        title="将自动生成"
+        items={[
+          { label: '主体 CN（可在高级选项中改）', value: commonName?.trim() || name || '（与根证书名称相同）' },
+          { label: '下载 / 分发文件名', value: previewName },
+        ]}
+        footnote="内部公钥文件在证书库中固定为 rootCA.crt。私钥只写入数据库，名为 rootCA.key 的材料不会出现在 RustFS 中。"
+      />
+      <AdvancedOptions>
+        <Row gutter={16}>
+          <Col xs={24} md={12}>
+            <Form.Item label="主体通用名称（CN）" name="commonName" extra="不填则使用根证书名称。">
+              <Input maxLength={128} placeholder="可选" />
+            </Form.Item>
+          </Col>
+          <Col xs={24} md={12}>
+            <Form.Item label="组织" name="organization" extra={<FieldHint example="我的公司">写入证书主体的组织字段，可不填。</FieldHint>}>
+              <Input maxLength={64} placeholder="可选" />
+            </Form.Item>
+          </Col>
+          <Col xs={24} md={12}>
+            <Form.Item label="部门" name="organizationalUnit">
+              <Input maxLength={64} placeholder="可选" />
+            </Form.Item>
+          </Col>
+          <Col xs={24} md={12}>
+            <Form.Item
+              label="国家代码"
+              name="country"
+              rules={[{ pattern: /^[A-Za-z]{0,2}$/, message: '国家代码必须是 2 位字母' }]}
+              normalize={(value: string) => (value ? value.toUpperCase() : value)}
+              extra={<FieldHint example="CN">两位国家代码，默认 CN。</FieldHint>}
+            >
+              <Input maxLength={2} placeholder="CN" />
+            </Form.Item>
+          </Col>
+          <Col xs={24} md={12}>
+            <Form.Item label="省 / 州" name="stateOrProvince">
+              <Input maxLength={128} placeholder="可选" />
+            </Form.Item>
+          </Col>
+          <Col xs={24} md={12}>
+            <Form.Item label="城市" name="locality">
+              <Input maxLength={128} placeholder="可选" />
+            </Form.Item>
+          </Col>
+          <Col xs={24} md={12}>
+            <Form.Item label="邮箱" name="emailAddress" rules={[{ type: 'email', message: '请输入有效的邮箱地址' }]}>
+              <Input maxLength={128} placeholder="可选" />
+            </Form.Item>
+          </Col>
+          <Col xs={24} md={12}>
+            <Form.Item label="密钥长度" name="keySize" extra="4096 位生成可能需要数十秒，8192 位可能需要数分钟。" rules={[{ required: true }]}>
+              <Select
+                options={[
+                  { value: 2048, label: '2048 位' },
+                  { value: 4096, label: '4096 位（推荐）' },
+                  { value: 8192, label: '8192 位（较慢）' },
+                ]}
+              />
+            </Form.Item>
+          </Col>
+          <Col xs={24} md={12}>
+            <Form.Item
+              label="有效期（天）"
+              name="days"
+              rules={[{ required: true }]}
+              extra="默认 3650 天（10 年），最长 50 年（18250 天）。"
+            >
+              <InputNumber min={1} max={MAX_CERT_VALIDITY_DAYS} style={{ width: '100%' }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} md={12}>
+            <Form.Item label="生效时间" name="notBefore" extra="留空则使用当前时间。">
+              <DatePicker showTime style={{ width: '100%' }} placeholder="默认为现在" />
+            </Form.Item>
+          </Col>
+          <Col xs={24} md={12}>
+            <Form.Item label="签名算法" name="hashAlgorithm" rules={[{ required: true }]}>
+              <Select
+                options={[
+                  { value: 'sha256', label: 'SHA-256' },
+                  { value: 'sha384', label: 'SHA-384' },
+                  { value: 'sha512', label: 'SHA-512' },
+                ]}
+              />
+            </Form.Item>
+          </Col>
+          <Col xs={24} md={12}>
+            <Form.Item label="路径长度约束" name="pathLenConstraint" extra="可选。0 表示只能签发终端证书。">
+              <InputNumber min={0} style={{ width: '100%' }} placeholder="不设置" />
+            </Form.Item>
+          </Col>
+          <Col xs={24}>
+            <Form.Item
+              label="下载文件名"
+              name="publicFileName"
+              extra={<FieldHint example="Lan-Root-CA.crt">只影响客户端安装和分发时的文件名。不填则根据根证书名称自动生成。</FieldHint>}
+            >
+              <Input maxLength={200} placeholder={previewName} />
+            </Form.Item>
+          </Col>
+        </Row>
+      </AdvancedOptions>
       <Form.Item>
-        <Button type="primary" htmlType="submit" loading={loading} danger={danger}>
-          {submitText}
+        <Button type="primary" htmlType="submit" loading={loading}>
+          创建根证书
         </Button>
       </Form.Item>
     </Form>
   );
 }
 
-function CaDetailsView({ details }: { details: CaDetails }) {
+function CaDetailsView({ details }: { details: RootCaSummary }) {
   return (
-    <Descriptions
-      bordered
-      size="middle"
-      column={{ xs: 1, sm: 1, md: 2 }}
-      styles={{ label: { width: 160 } }}
-    >
-      <Descriptions.Item label="通用名称（CN）">
-        {details.subject.commonName ?? '—'}
+    <Descriptions bordered size="middle" column={{ xs: 1, sm: 1, md: 2 }} styles={{ label: { width: 160 } }}>
+      <Descriptions.Item label="根证书名称">{details.name}</Descriptions.Item>
+      <Descriptions.Item label="下载文件名">{details.publicFileName}</Descriptions.Item>
+      <Descriptions.Item label="状态">
+        {details.status === 'active' ? <Tag color="success">启用中</Tag> : <Tag>已停用</Tag>}
       </Descriptions.Item>
-      <Descriptions.Item label="公共文件名">{details.publicFileName}</Descriptions.Item>
       <Descriptions.Item label="是否为 CA">
-        {details.isCA ? <Tag color="green">CA:TRUE</Tag> : <Tag color="red">CA:FALSE</Tag>}
+        {details.isCA ? <Tag color="success">CA:TRUE</Tag> : <Tag color="error">CA:FALSE</Tag>}
       </Descriptions.Item>
-      <Descriptions.Item label="国家（C）">{details.subject.country ?? '—'}</Descriptions.Item>
-      <Descriptions.Item label="省 / 州（ST）">
-        {details.subject.stateOrProvince ?? '—'}
-      </Descriptions.Item>
-      <Descriptions.Item label="城市（L）">{details.subject.locality ?? '—'}</Descriptions.Item>
-      <Descriptions.Item label="组织（O）">
-        {details.subject.organization ?? '—'}
-      </Descriptions.Item>
-      <Descriptions.Item label="组织单位（OU）">
-        {details.subject.organizationalUnit ?? '—'}
-      </Descriptions.Item>
+      <Descriptions.Item label="国家">{details.subject.country ?? '—'}</Descriptions.Item>
+      <Descriptions.Item label="组织">{details.subject.organization ?? '—'}</Descriptions.Item>
+      <Descriptions.Item label="部门">{details.subject.organizationalUnit ?? '—'}</Descriptions.Item>
       <Descriptions.Item label="邮箱">{details.subject.emailAddress ?? '—'}</Descriptions.Item>
-      <Descriptions.Item label="颁发者">
-        {details.issuer.commonName ?? '—'}
-        {details.issuer.organization ? ` / ${details.issuer.organization}` : ''}
-      </Descriptions.Item>
+      <Descriptions.Item label="颁发者">{details.issuer.commonName ?? '—'}</Descriptions.Item>
       <Descriptions.Item label="序列号">
-        <Typography.Text copyable={{ text: details.serialNumber }}>
-          {details.serialNumber}
-        </Typography.Text>
+        <Typography.Text copyable={{ text: details.serialNumber }}>{details.serialNumber}</Typography.Text>
       </Descriptions.Item>
-      <Descriptions.Item label="生效时间">
-        {dayjs(details.notBefore).format('YYYY-MM-DD HH:mm:ss')}
-      </Descriptions.Item>
-      <Descriptions.Item label="到期时间">
-        {dayjs(details.notAfter).format('YYYY-MM-DD HH:mm:ss')}
-      </Descriptions.Item>
+      <Descriptions.Item label="生效时间">{dayjs(details.notBefore).format('YYYY-MM-DD HH:mm:ss')}</Descriptions.Item>
+      <Descriptions.Item label="到期时间">{dayjs(details.notAfter).format('YYYY-MM-DD HH:mm:ss')}</Descriptions.Item>
       <Descriptions.Item label="签名算法">{details.signatureAlgorithm}</Descriptions.Item>
       <Descriptions.Item label="公钥">
         {details.publicKeyAlgorithm} {details.publicKeyBits} 位
       </Descriptions.Item>
       <Descriptions.Item label="密钥用法">
-        {details.keyUsage.length
-          ? details.keyUsage.map((item) => KEY_USAGE_LABELS[item] ?? item).join('，')
-          : '—'}
+        {details.keyUsage.length ? details.keyUsage.map((item) => KEY_USAGE_LABELS[item] ?? item).join('，') : '—'}
       </Descriptions.Item>
       <Descriptions.Item label="路径长度约束">
         {details.pathLenConstraint === null ? '未设置' : details.pathLenConstraint}
@@ -368,20 +473,7 @@ function splitPublicName(name: string): { stem: string; format: CaCertFormat } {
   return { stem: name.trim(), format: 'crt' };
 }
 
-function previewPublicFileName(
-  input: string,
-  format: CaCertFormat,
-  fallbackName: string,
-): string {
-  const stem = input.trim().replace(/\.(crt|cer|pem)$/i, '');
-  if (stem) {
-    return `${stem}.${format}`;
-  }
-  const fallbackStem = splitPublicName(fallbackName).stem;
-  return `${fallbackStem}.${format}`;
-}
-
-function CaDownloadPanel({ details }: { details: CaDetails }) {
+function CaDownloadPanel({ details }: { details: RootCaSummary }) {
   const { message } = App.useApp();
   const initial = splitPublicName(details.publicFileName);
   const [stem, setStem] = useState(initial.stem);
@@ -394,15 +486,12 @@ function CaDownloadPanel({ details }: { details: CaDetails }) {
     setFormat(next.format);
   }, [details.publicFileName]);
 
-  const preview = previewPublicFileName(stem, format, details.publicFileName);
+  const preview = `${(stem.trim() || initial.stem)}.${format}`;
 
   const handleDownload = async () => {
     setDownloading(true);
     try {
-      const filename = await downloadCaCert({
-        filename: stem.trim() || undefined,
-        format,
-      });
+      const filename = await downloadCaCert(details.id, { filename: stem.trim() || undefined, format });
       message.success(`已开始下载 ${filename}`);
     } catch (error) {
       message.error(getApiErrorMessage(error, '下载根证书失败'));
@@ -412,223 +501,29 @@ function CaDownloadPanel({ details }: { details: CaDetails }) {
   };
 
   return (
-    <Card title="下载根证书">
-      <Space direction="vertical" size={16} style={{ width: '100%' }}>
+    <Card className="surface-card" title="下载根证书公钥">
+      <Space orientation="vertical" size={16} style={{ width: '100%' }}>
         <Alert
           type="info"
           showIcon
-          message="下载的是同一份 PEM 公钥证书，仅文件名和扩展名不同，可用于客户端安装与分发。不会下载 rootCA.key。"
+          title="下载的是根证书公钥，用来安装到访问网站的电脑上。不会下载 rootCA.key。"
         />
         <Row gutter={16}>
-          <Col xs={24} md={12}>
-            <Typography.Text strong>公共文件名</Typography.Text>
-            <Input
-              style={{ marginTop: 8 }}
-              value={stem}
-              maxLength={200}
-              placeholder={splitPublicName(details.suggestedFileName).stem}
-              onChange={(event) => setStem(event.target.value)}
-              addonAfter={
-                <Button
-                  type="link"
-                  size="small"
-                  style={{ padding: 0 }}
-                  onClick={() => {
-                    const suggested = splitPublicName(details.suggestedFileName);
-                    setStem(suggested.stem);
-                    setFormat(suggested.format);
-                  }}
-                >
-                  使用建议名
-                </Button>
-              }
-            />
+          <Col xs={24} md={14}>
+            <Space.Compact block>
+              <Input value={stem} onChange={(event) => setStem(event.target.value)} />
+              <Input value={`.${format}`} readOnly tabIndex={-1} style={{ width: 88, textAlign: 'center' }} />
+            </Space.Compact>
           </Col>
-          <Col xs={24} md={6}>
-            <Typography.Text strong>格式</Typography.Text>
-            <Select
-              style={{ width: '100%', marginTop: 8 }}
-              value={format}
-              options={CERT_FORMAT_OPTIONS}
-              onChange={(value) => setFormat(value)}
-            />
+          <Col xs={24} md={10}>
+            <Select value={format} onChange={setFormat} options={CERT_FORMAT_OPTIONS} style={{ width: '100%' }} />
           </Col>
         </Row>
-        <div>
-          <Typography.Text type="secondary">最终文件名预览：</Typography.Text>
-          <Typography.Text code style={{ marginLeft: 8 }}>
-            {preview}
-          </Typography.Text>
-        </div>
-        <Button
-          type="primary"
-          icon={<DownloadOutlined />}
-          loading={downloading}
-          onClick={() => void handleDownload()}
-        >
-          下载 {preview}
+        <Typography.Text type="secondary">将下载为 {preview}</Typography.Text>
+        <Button type="primary" icon={<DownloadOutlined />} loading={downloading} onClick={() => void handleDownload()}>
+          下载根证书
         </Button>
       </Space>
     </Card>
-  );
-}
-
-export function RootCaPage() {
-  const { message, modal } = App.useApp();
-  const queryClient = useQueryClient();
-
-  const query = useQuery({
-    queryKey: ['ca'],
-    queryFn: getCaStatus,
-  });
-
-  const mutation = useMutation({
-    mutationFn: createCa,
-    onSuccess: async () => {
-      message.success('根 CA 创建成功');
-      await queryClient.invalidateQueries({ queryKey: ['ca'] });
-    },
-    onError: (error: unknown) => {
-      message.error(getApiErrorMessage(error, '创建根 CA 失败'));
-    },
-  });
-
-  const status = query.data;
-  const details = status && isCaDetails(status) ? status : undefined;
-  const incomplete = status?.exists === true && status.incomplete === true;
-
-  const createInitialValues = useMemo(() => DEFAULT_VALUES, []);
-  const overwriteInitialValues = useMemo(
-    () => (details ? detailsToFormValues(details) : DEFAULT_VALUES),
-    [details],
-  );
-
-  const handleCreate = (values: CaFormValues) => {
-    message.loading({
-      content: '正在生成密钥并签发根证书，请稍候…',
-      key: 'create-ca',
-      duration: 0,
-    });
-    mutation.mutate(buildPayload(values), {
-      onSettled: () => message.destroy('create-ca'),
-    });
-  };
-
-  const handleOverwrite = (values: CaFormValues) => {
-    modal.confirm({
-      title: '确认覆盖现有根 CA？',
-      content: (
-        <div>
-          <p>重新创建将替换现有的根证书和私钥，此操作不可撤销。</p>
-          <p>
-            已经使用该根 CA 签发的服务器证书将全部失效，客户端需要重新安装新的根证书后才能信任新签发的证书。
-          </p>
-        </div>
-      ),
-      okText: '确认覆盖',
-      okButtonProps: { danger: true },
-      cancelText: '取消',
-      onOk: () =>
-        new Promise<void>((resolve, reject) => {
-          message.loading({
-            content: '正在重新生成根 CA，请稍候…',
-            key: 'create-ca',
-            duration: 0,
-          });
-          mutation.mutate(buildPayload(values, true), {
-            onSuccess: () => resolve(),
-            onError: (error) => reject(error),
-            onSettled: () => message.destroy('create-ca'),
-          });
-        }).catch(() => {
-          // 错误已在 mutation.onError 中提示，阻止 Modal 抛出未捕获异常
-        }),
-    });
-  };
-
-  return (
-    <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <Typography.Title level={3} style={{ margin: 0 }}>
-        <SafetyCertificateOutlined style={{ marginRight: 8 }} />
-        根 CA
-      </Typography.Title>
-      <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
-        创建并管理私有根证书颁发机构。根 CA 私钥只保存在本机服务器，接口不会返回或提供
-        rootCA.key 下载。
-      </Typography.Paragraph>
-
-      {query.isLoading ? (
-        <Card>
-          <Spin tip="正在读取根 CA 状态…">
-            <div style={{ minHeight: 120 }} />
-          </Spin>
-        </Card>
-      ) : query.isError ? (
-        <Alert
-          type="error"
-          showIcon
-          message="无法获取根 CA 状态"
-          description={getApiErrorMessage(query.error, '请确认后端服务已启动后重试。')}
-          action={
-            <Button size="small" onClick={() => void query.refetch()}>
-              重试
-            </Button>
-          }
-        />
-      ) : details ? (
-        <>
-          <Card title="证书详情">
-            <Alert
-              type="info"
-              showIcon
-              style={{ marginBottom: 16 }}
-              message={`请将下载的根证书（例如 ${details.publicFileName}）安装到客户端的「受信任的根证书颁发机构」。内部私钥 rootCA.key 仅保存在服务器，不会提供下载。`}
-            />
-            <CaDetailsView details={details} />
-          </Card>
-          <CaDownloadPanel details={details} />
-          <Card title="重新创建 / 覆盖根 CA">
-            <Alert
-              type="warning"
-              showIcon
-              style={{ marginBottom: 16 }}
-              message="覆盖现有根 CA 会使已经签发的服务器证书全部失效，提交前需要二次确认。"
-            />
-            <CaCreateForm
-              initialValues={overwriteInitialValues}
-              submitText="覆盖并重新创建"
-              danger
-              loading={mutation.isPending}
-              onSubmit={handleOverwrite}
-            />
-          </Card>
-        </>
-      ) : (
-        <Card title="创建根 CA">
-          {incomplete ? (
-            <Alert
-              type="warning"
-              showIcon
-              style={{ marginBottom: 16 }}
-              message={status && 'message' in status ? status.message : '根 CA 文件不完整'}
-            />
-          ) : (
-            <Alert
-              type="info"
-              showIcon
-              style={{ marginBottom: 16 }}
-              message="尚未创建根 CA。请填写下列配置后创建，默认值与实施文档中的私有根 CA 主体一致。"
-            />
-          )}
-          <CaCreateForm
-            initialValues={createInitialValues}
-            submitText={incomplete ? '覆盖并创建根 CA' : '创建根 CA'}
-            danger={incomplete}
-            loading={mutation.isPending}
-            onSubmit={incomplete ? handleOverwrite : handleCreate}
-          />
-        </Card>
-      )}
-    </Space>
   );
 }

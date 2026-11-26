@@ -18,13 +18,13 @@ export class CertsController {
     return this.certsService.issue(dto);
   }
 
-  @Get(':name/download')
+  @Get(':id/download')
   async download(
-    @Param('name') name: string,
+    @Param('id') id: string,
     @Query() query: DownloadCertQueryDto,
     @Res({ passthrough: true }) res: Response,
   ): Promise<StreamableFile> {
-    const result = await this.certsService.openDownload(name, {
+    const result = await this.certsService.openDownload(id, {
       part: query.part,
       filename: query.filename,
       format: query.format,
@@ -40,8 +40,8 @@ export class CertsController {
     return new StreamableFile(result.stream);
   }
 
-  @Get(':name')
-  getDetail(@Param('name') name: string) {
-    return this.certsService.getDetail(name);
+  @Get(':id')
+  getDetail(@Param('id') id: string) {
+    return this.certsService.getDetail(id);
   }
 }

@@ -8,13 +8,13 @@ import {
   Checkbox,
   Form,
   Select,
-  Space,
   Switch,
   Table,
   Tag,
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
+import { useNavigate } from 'react-router-dom';
 import dayjs from 'dayjs';
 import { getApiErrorMessage } from '../api/http';
 import {
@@ -26,6 +26,10 @@ import {
   listTargetFiles,
 } from '../api/ssl';
 import type { DeployRecord, TargetFileList } from '../api/types';
+import { FieldHint } from '../components/FieldHint';
+import { NextStepCard } from '../components/NextStepCard';
+import { PageHeader } from '../components/PageHeader';
+import { WorkflowBar } from '../components/WorkflowBar';
 
 interface DeployForm {
   certificateId: string;
@@ -37,6 +41,7 @@ interface DeployForm {
 
 export function DeployPage() {
   const { message, modal } = App.useApp();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [form] = Form.useForm<DeployForm>();
   const serverId = Form.useWatch('serverId', form);
@@ -47,9 +52,12 @@ export function DeployPage() {
   const serversQuery = useQuery({ queryKey: ['servers'], queryFn: listServers });
   const deploysQuery = useQuery({ queryKey: ['deploys'], queryFn: listDeploys });
 
+  const certs = certsQuery.data?.items ?? [];
+  const servers = serversQuery.data?.items ?? [];
+
   const selectedServer = useMemo(
-    () => serversQuery.data?.items.find((item) => item.id === serverId),
-    [serversQuery.data, serverId],
+    () => servers.find((item) => item.id === serverId),
+    [servers, serverId],
   );
 
   const filesQuery = useQuery({
@@ -62,7 +70,7 @@ export function DeployPage() {
     mutationFn: createDeploy,
     onSuccess: async (result) => {
       setLastResult(result);
-      message.success('已上传到文件服务器');
+      message.success('已部署到服务器 cert 目录（deploy/ 前缀）');
       await queryClient.invalidateQueries({ queryKey: ['deploys'] });
       await queryClient.invalidateQueries({ queryKey: ['target-files'] });
     },
@@ -89,7 +97,7 @@ export function DeployPage() {
       modal.confirm({
         title: '确认覆盖目标路径下的已有文件？',
         content:
-          '将覆盖 RustFS 中该服务器/路径前缀下的同名文件。上传包包含服务器证书和服务器私钥；可选包含根 CA 公钥。绝不会上传 rootCA.key。',
+          '将覆盖「服务器部署目录」（deploy/ 前缀）下的同名文件。这与证书库（archive/）不是同一处。上传包包含服务器证书和服务器私钥；可选包含该证书所属根的公钥。绝不会上传 rootCA.key。',
         okText: '确认覆盖并上传',
         cancelText: '取消',
         onOk: run,
@@ -162,7 +170,7 @@ export function DeployPage() {
       render: (value: DeployRecord['server']) => value.name ?? value.id,
     },
     {
-      title: '路径',
+      title: '目录',
       dataIndex: 'path',
       render: (value: DeployRecord['path']) => value.path ?? value.id,
     },
@@ -178,104 +186,144 @@ export function DeployPage() {
     },
   ];
 
+  const missingPrereq = !certsQuery.isLoading && !serversQuery.isLoading && (certs.length === 0 || servers.length === 0);
+
   return (
-    <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <Typography.Title level={3} style={{ margin: 0 }}>
-        上传部署
-      </Typography.Title>
-      <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
-        将已签发证书上传到 RustFS 中对应的「服务器 / 部署路径」前缀。至少包含服务器证书和服务器私钥；可选上传根
-        CA 公钥。禁止上传 rootCA.key。当前不会通过 SSH 直接写入远程机器磁盘。
-      </Typography.Paragraph>
+    <div className="page-stack">
+      <PageHeader
+        title="上传部署"
+        description="把要用的文件部署到某台服务器的 cert 目录（或你登记的部署路径）在 RustFS 中对应的前缀下，以 deploy/ 开头。这与「证书库」完全分开，也不会通过 SSH 写入远程磁盘，下载后再自行拷到 Nginx。"
+      />
+      <WorkflowBar current="deploy" />
 
       <Alert
         type="warning"
         showIcon
-        message="私钥只用于部署到对应 Nginx"
-        description="上传包中的 .key 是服务器私钥，不要分发给客户端。根 CA 私钥始终只保存在本机 data 目录。"
+        title="私钥只用于部署到对应 Nginx"
+        description="上传包中的 .key 是服务器私钥，不要分发给客户端。根 CA 私钥只保存在数据库中，绝不会被上传或下载。"
       />
 
-      <Card title="执行上传">
-        <Form<DeployForm>
-          form={form}
-          layout="vertical"
-          initialValues={{ includeRootCaCert: false, overwrite: false }}
-          onFinish={submit}
-        >
-          <Form.Item label="证书" name="certificateId" rules={[{ required: true, message: '请选择证书' }]}>
-            <Select
-              showSearch
-              optionFilterProp="label"
-              loading={certsQuery.isLoading}
-              options={(certsQuery.data?.items ?? []).map((item) => ({
-                value: item.id,
-                label: `${item.name}（${item.ips.join(', ')}）`,
-              }))}
-            />
-          </Form.Item>
-          <Form.Item label="目标服务器" name="serverId" rules={[{ required: true, message: '请选择服务器' }]}>
-            <Select
-              showSearch
-              optionFilterProp="label"
-              loading={serversQuery.isLoading}
-              options={(serversQuery.data?.items ?? []).map((item) => ({
-                value: item.id,
-                label: item.host ? `${item.name}（${item.host}）` : item.name,
-              }))}
-              onChange={() => form.setFieldValue('pathId', undefined)}
-            />
-          </Form.Item>
-          <Form.Item label="目标路径" name="pathId" rules={[{ required: true, message: '请选择部署路径' }]}>
-            <Select
-              options={(selectedServer?.paths ?? []).map((item) => ({
-                value: item.id,
-                label: item.label ? `${item.path}（${item.label}）` : item.path,
-              }))}
-              placeholder={serverId ? '请选择路径' : '请先选择服务器'}
-            />
-          </Form.Item>
-          <Form.Item name="includeRootCaCert" valuePropName="checked">
-            <Checkbox>同时上传根 CA 公钥（rootCA.crt / 公共文件名），便于客户端安装信任</Checkbox>
-          </Form.Item>
-          <Form.Item name="overwrite" label="覆盖已有文件" valuePropName="checked">
-            <Switch />
-          </Form.Item>
-          <Button type="primary" htmlType="submit" loading={deploy.isPending}>
-            上传到目标路径
-          </Button>
-        </Form>
-      </Card>
+      {missingPrereq ? (
+        <Card className="surface-card">
+          <div className="empty-panel">
+            <h4>还不能部署到服务器目录</h4>
+            <p>
+              {certs.length === 0
+                ? '请先签发一张服务器证书，再登记服务器和部署目录。'
+                : '请先登记服务器，并为其添加部署目录，例如 /etc/nginx/ssl。'}
+            </p>
+            <Button type="primary" onClick={() => navigate(certs.length === 0 ? '/issue' : '/servers')}>
+              {certs.length === 0 ? '去签发证书' : '去登记服务器'}
+            </Button>
+          </div>
+        </Card>
+      ) : (
+        <Card className="surface-card" title="选择证书和目标目录">
+          <Form<DeployForm>
+            form={form}
+            layout="vertical"
+            initialValues={{ includeRootCaCert: false, overwrite: false }}
+            onFinish={submit}
+          >
+            <Form.Item
+              label="要部署的证书"
+              name="certificateId"
+              rules={[{ required: true, message: '请选择证书' }]}
+              extra={<FieldHint>选择一张已签发的服务器证书。会同时放入它的证书文件和私钥。若所属根已停用，该证书会显示为需重签，仅建议在迁移期间临时使用。</FieldHint>}
+            >
+              <Select
+                showSearch
+                optionFilterProp="label"
+                loading={certsQuery.isLoading}
+                options={certs.map((item) => ({
+                  value: item.id,
+                  label: `${item.publicFileName}（${item.ips.join(', ')}）`,
+                }))}
+              />
+            </Form.Item>
+            <Form.Item
+              label="目标服务器"
+              name="serverId"
+              rules={[{ required: true, message: '请选择服务器' }]}
+              extra={<FieldHint example="web-01">这里选择的是登记时的管理名称，用作文件服务器中的目录前缀。</FieldHint>}
+            >
+              <Select
+                showSearch
+                optionFilterProp="label"
+                loading={serversQuery.isLoading}
+                options={servers.map((item) => ({
+                  value: item.id,
+                  label: item.host ? `${item.name}（${item.host}）` : item.name,
+                }))}
+                onChange={() => form.setFieldValue('pathId', undefined)}
+              />
+            </Form.Item>
+            <Form.Item
+              label="目标目录"
+              name="pathId"
+              rules={[{ required: true, message: '请选择部署目录' }]}
+              extra={
+                <FieldHint example="/etc/nginx/ssl">
+                  对应这台机器上的 cert 目录或你登记的部署路径。文件会存到 deploy/服务器名/该目录 前缀下，需再拷到机器上的真实路径。
+                </FieldHint>
+              }
+            >
+              <Select
+                options={(selectedServer?.paths ?? []).map((item) => ({
+                  value: item.id,
+                  label: item.label ? `${item.path}（${item.label}）` : item.path,
+                }))}
+                placeholder={serverId ? '请选择目录' : '请先选择服务器'}
+              />
+            </Form.Item>
+            <Form.Item name="includeRootCaCert" valuePropName="checked">
+              <Checkbox>同时放入签发该证书的那棵根的公钥，方便之后拷到客户端安装。不会上传 rootCA.key。</Checkbox>
+            </Form.Item>
+            <Form.Item
+              name="overwrite"
+              label="覆盖已有文件"
+              valuePropName="checked"
+              extra="若该目录前缀下已有同名文件，需要打开此项才会替换。"
+            >
+              <Switch />
+            </Form.Item>
+            <Button type="primary" htmlType="submit" loading={deploy.isPending}>
+              部署到服务器 cert 目录
+            </Button>
+          </Form>
+        </Card>
+      )}
 
       {lastResult ? (
-        <Card title="最近一次上传结果">
-          <Alert
-            type="success"
-            showIcon
-            message={`已写入前缀 ${lastResult.objectPrefix}`}
-            description={lastResult.warning}
-          />
-          <Table
-            style={{ marginTop: 16 }}
-            rowKey="objectKey"
-            pagination={false}
-            dataSource={lastResult.files}
-            columns={[
-              { title: '文件名', dataIndex: 'fileName' },
-              { title: '对象键', dataIndex: 'objectKey' },
-              { title: '大小', dataIndex: 'size', render: (size: number) => `${size} B` },
-            ]}
-          />
-        </Card>
+        <>
+          <Card className="surface-card" title="最近一次部署结果（服务器部署目录）">
+            <Alert
+              type="success"
+              showIcon
+              title={`已写入前缀 ${lastResult.objectPrefix}`}
+              description={lastResult.warning}
+            />
+            <Table
+              style={{ marginTop: 16 }}
+              rowKey="objectKey"
+              pagination={false}
+              dataSource={lastResult.files}
+              columns={[
+                { title: '文件名', dataIndex: 'fileName' },
+                { title: '对象键', dataIndex: 'objectKey' },
+                { title: '大小', dataIndex: 'size', render: (size: number) => `${size} B` },
+              ]}
+            />
+          </Card>
+          <NextStepCard after="deploy" />
+        </>
       ) : null}
 
       <Card
-        title="目标路径中的文件"
+        className="surface-card"
+        title="该服务器部署目录中的文件"
         extra={
-          <Button
-            size="small"
-            disabled={!serverId || !pathId}
-            onClick={() => void filesQuery.refetch()}
-          >
+          <Button size="small" disabled={!serverId || !pathId} onClick={() => void filesQuery.refetch()}>
             刷新
           </Button>
         }
@@ -285,15 +333,13 @@ export function DeployPage() {
             <Alert
               type="error"
               showIcon
-              message="无法列出目标文件"
+              title="无法列出目标文件"
               description={getApiErrorMessage(filesQuery.error, '请确认 RustFS 已启动。')}
             />
           ) : (
             <>
               {filesQuery.data?.prefix ? (
-                <Typography.Paragraph type="secondary">
-                  前缀：{filesQuery.data.prefix}
-                </Typography.Paragraph>
+                <Typography.Paragraph type="secondary">前缀：{filesQuery.data.prefix}</Typography.Paragraph>
               ) : null}
               <Table
                 rowKey="key"
@@ -305,11 +351,11 @@ export function DeployPage() {
             </>
           )
         ) : (
-          <Typography.Text type="secondary">选择服务器和路径后，将显示该前缀下已上传的文件。</Typography.Text>
+          <Typography.Text type="secondary">选择服务器和目录后，将显示 deploy/ 前缀下已部署的文件。证书库中的档案不会出现在这里。</Typography.Text>
         )}
       </Card>
 
-      <Card title="上传记录">
+      <Card className="surface-card" title="部署记录">
         <Table
           rowKey="id"
           loading={deploysQuery.isLoading}
@@ -318,6 +364,6 @@ export function DeployPage() {
           pagination={{ pageSize: 8 }}
         />
       </Card>
-    </Space>
+    </div>
   );
 }

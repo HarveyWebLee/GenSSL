@@ -6,6 +6,7 @@ import zhCN from 'antd/locale/zh_CN';
 import dayjs from 'dayjs';
 import 'dayjs/locale/zh-cn';
 import App from './App';
+import { appTheme } from './theme/appTheme';
 import './index.css';
 
 dayjs.locale('zh-cn');
@@ -28,15 +29,7 @@ if (!container) {
 createRoot(container).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <ConfigProvider
-        locale={zhCN}
-        theme={{
-          token: {
-            colorPrimary: '#1677ff',
-            borderRadius: 8,
-          },
-        }}
-      >
+      <ConfigProvider locale={zhCN} theme={appTheme}>
         <AntApp>
           <App />
         </AntApp>

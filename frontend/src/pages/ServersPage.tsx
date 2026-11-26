@@ -14,6 +14,7 @@ import {
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
+import { PlusOutlined } from '@ant-design/icons';
 import { getApiErrorMessage } from '../api/http';
 import {
   addServerPath,
@@ -25,6 +26,10 @@ import {
   updateServerPath,
 } from '../api/ssl';
 import type { ServerPath, ServerRecord } from '../api/types';
+import { FieldHint } from '../components/FieldHint';
+import { NextStepCard } from '../components/NextStepCard';
+import { PageHeader } from '../components/PageHeader';
+import { WorkflowBar } from '../components/WorkflowBar';
 
 interface ServerForm {
   name: string;
@@ -43,6 +48,7 @@ export function ServersPage() {
   const [serverForm] = Form.useForm<ServerForm>();
   const [pathForm] = Form.useForm<PathForm>();
   const [editing, setEditing] = useState<ServerRecord | null>(null);
+  const [serverOpen, setServerOpen] = useState(false);
   const [pathTarget, setPathTarget] = useState<{ server: ServerRecord; path?: ServerPath } | null>(
     null,
   );
@@ -52,9 +58,17 @@ export function ServersPage() {
     queryFn: listServers,
   });
 
+  const servers = query.data?.items ?? [];
+
   const invalidate = async () => {
     await queryClient.invalidateQueries({ queryKey: ['servers'] });
     await queryClient.invalidateQueries({ queryKey: ['overview'] });
+  };
+
+  const closeServerModal = () => {
+    setServerOpen(false);
+    setEditing(null);
+    serverForm.resetFields();
   };
 
   const saveServer = useMutation({
@@ -65,9 +79,8 @@ export function ServersPage() {
       return createServer(values);
     },
     onSuccess: async () => {
-      message.success(editing ? '服务器已更新' : '服务器已创建');
-      setEditing(null);
-      serverForm.resetFields();
+      message.success(editing ? '服务器已更新' : '服务器已登记');
+      closeServerModal();
       await invalidate();
     },
     onError: (error) => message.error(getApiErrorMessage(error, '保存失败')),
@@ -93,33 +106,58 @@ export function ServersPage() {
       return addServerPath(pathTarget.server.id, values);
     },
     onSuccess: async () => {
-      message.success('部署路径已保存');
+      message.success('部署目录已保存');
       setPathTarget(null);
       pathForm.resetFields();
       await invalidate();
     },
-    onError: (error) => message.error(getApiErrorMessage(error, '保存路径失败')),
+    onError: (error) => message.error(getApiErrorMessage(error, '保存目录失败')),
   });
 
   const removePath = useMutation({
     mutationFn: ({ serverId, pathId }: { serverId: string; pathId: string }) =>
       deleteServerPath(serverId, pathId),
     onSuccess: async () => {
-      message.success('部署路径已删除');
+      message.success('部署目录已删除');
       await invalidate();
     },
-    onError: (error) => message.error(getApiErrorMessage(error, '删除路径失败')),
+    onError: (error) => message.error(getApiErrorMessage(error, '删除目录失败')),
   });
 
+  const openCreate = () => {
+    setEditing(null);
+    serverForm.resetFields();
+    setServerOpen(true);
+  };
+
+  const openEdit = (row: ServerRecord) => {
+    setEditing(row);
+    serverForm.setFieldsValue({
+      name: row.name,
+      host: row.host ?? undefined,
+      description: row.description ?? undefined,
+    });
+    setServerOpen(true);
+  };
+
   const columns: ColumnsType<ServerRecord> = [
-    { title: '名称', dataIndex: 'name' },
-    { title: '主机 / IP', dataIndex: 'host', render: (value?: string | null) => value || '—' },
-    { title: '说明', dataIndex: 'description', ellipsis: true, render: (value?: string | null) => value || '—' },
     {
-      title: '部署路径',
+      title: '管理名称',
+      dataIndex: 'name',
+      render: (value: string) => <Typography.Text strong>{value}</Typography.Text>,
+    },
+    { title: '实际地址', dataIndex: 'host', render: (value?: string | null) => value || '—' },
+    {
+      title: '说明',
+      dataIndex: 'description',
+      ellipsis: true,
+      render: (value?: string | null) => value || '—',
+    },
+    {
+      title: '部署目录',
       key: 'paths',
       render: (_, row) => (
-        <Space direction="vertical" size={4}>
+        <Space orientation="vertical" size={4}>
           {(row.paths ?? []).map((item) => (
             <Space key={item.id} wrap>
               <Typography.Text code>{item.path}</Typography.Text>
@@ -135,7 +173,7 @@ export function ServersPage() {
                 编辑
               </Button>
               <Popconfirm
-                title="删除该部署路径？"
+                title="删除该部署目录？"
                 onConfirm={() => removePath.mutate({ serverId: row.id, pathId: item.id })}
               >
                 <Button type="link" size="small" danger>
@@ -152,7 +190,7 @@ export function ServersPage() {
               pathForm.resetFields();
             }}
           >
-            添加路径
+            添加目录
           </Button>
         </Space>
       ),
@@ -160,23 +198,13 @@ export function ServersPage() {
     {
       title: '操作',
       key: 'actions',
+      width: 140,
       render: (_, row) => (
         <Space>
-          <Button
-            type="link"
-            size="small"
-            onClick={() => {
-              setEditing(row);
-              serverForm.setFieldsValue({
-                name: row.name,
-                host: row.host ?? undefined,
-                description: row.description ?? undefined,
-              });
-            }}
-          >
+          <Button type="link" size="small" onClick={() => openEdit(row)}>
             编辑
           </Button>
-          <Popconfirm title="删除该服务器及其路径？" onConfirm={() => removeServer.mutate(row.id)}>
+          <Popconfirm title="删除该服务器及其目录？" onConfirm={() => removeServer.mutate(row.id)}>
             <Button type="link" size="small" danger>
               删除
             </Button>
@@ -187,73 +215,93 @@ export function ServersPage() {
   ];
 
   return (
-    <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <Typography.Title level={3} style={{ margin: 0 }}>
-        服务器与路径
-      </Typography.Title>
-      <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
-        登记目标服务器及其证书部署路径文件夹，例如某台机、路径 /etc/nginx/ssl。上传时会按「服务器名 / 路径」写入 RustFS 前缀。
-      </Typography.Paragraph>
+    <div className="page-stack">
+      <PageHeader
+        title="服务器与路径"
+        description="在这里登记的是管理用的机器名称和证书准备放置的目录。名称用于列表识别，以及上传到文件服务器时的目录前缀，并不是 Nginx 自己的主机名。"
+        extra={
+          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+            登记服务器
+          </Button>
+        }
+      />
+      <WorkflowBar current="servers" />
 
-      <Card title={editing ? `编辑服务器：${editing.name}` : '新增服务器'}>
-        <Form<ServerForm>
-          form={serverForm}
-          layout="vertical"
-          onFinish={(values) => saveServer.mutate(values)}
-        >
-          <Form.Item label="名称" name="name" rules={[{ required: true, message: '请填写服务器名称' }]}>
-            <Input placeholder="web-01" />
-          </Form.Item>
-          <Form.Item label="主机 / IP" name="host">
-            <Input placeholder="192.168.99.242" />
-          </Form.Item>
-          <Form.Item label="说明" name="description">
-            <Input.TextArea rows={2} />
-          </Form.Item>
-          <Space>
-            <Button type="primary" htmlType="submit" loading={saveServer.isPending}>
-              {editing ? '保存' : '创建'}
-            </Button>
-            {editing ? (
-              <Button
-                onClick={() => {
-                  setEditing(null);
-                  serverForm.resetFields();
-                }}
-              >
-                取消编辑
-              </Button>
-            ) : null}
-          </Space>
-        </Form>
-      </Card>
-
-      <Card title="已登记服务器">
+      <Card className="surface-card" title="已登记的服务器">
         {query.isError ? (
           <Alert
             type="error"
             showIcon
-            message="无法获取服务器列表"
+            title="无法获取服务器列表"
             description={getApiErrorMessage(query.error, '请确认后端与数据库已启动。')}
           />
+        ) : !query.isLoading && servers.length === 0 ? (
+          <div className="empty-panel">
+            <h4>还没有登记服务器</h4>
+            <p>先给机器起一个管理名称，并添加证书要放到的目录，例如 /etc/nginx/ssl。上传部署时会按「管理名称 / 目录」存放文件。</p>
+            <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+              登记服务器
+            </Button>
+          </div>
         ) : (
           <Table
             rowKey="id"
             loading={query.isLoading}
             columns={columns}
-            dataSource={query.data?.items ?? []}
+            dataSource={servers}
             pagination={false}
           />
         )}
       </Card>
 
+      {servers.some((item) => item.paths.length > 0) ? <NextStepCard after="servers" /> : null}
+
+      <Modal
+        title={editing ? `编辑服务器：${editing.name}` : '登记服务器'}
+        open={serverOpen}
+        onCancel={closeServerModal}
+        onOk={() => serverForm.submit()}
+        confirmLoading={saveServer.isPending}
+        destroyOnHidden
+        okText={editing ? '保存' : '登记'}
+      >
+        <Form<ServerForm> form={serverForm} layout="vertical" onFinish={(values) => saveServer.mutate(values)}>
+          <Form.Item
+            label="管理名称"
+            name="name"
+            rules={[{ required: true, message: '请填写管理名称' }]}
+            extra={
+              <FieldHint example="web-01">
+                这台机器在本系统里叫什么。用于列表识别，以及上传到文件服务器时的目录前缀。不是 Nginx 的 hostname，也不会写进证书。
+              </FieldHint>
+            }
+          >
+            <Input placeholder="例：web-01" />
+          </Form.Item>
+          <Form.Item
+            label="实际地址（可选）"
+            name="host"
+            extra={
+              <FieldHint example="192.168.99.242">
+                方便辨认这台机器，不会写入证书，也不影响 Nginx 配置。
+              </FieldHint>
+            }
+          >
+            <Input placeholder="例：192.168.99.242" />
+          </Form.Item>
+          <Form.Item label="说明（可选）" name="description">
+            <Input.TextArea rows={2} placeholder="可选，仅供备注" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
       <Modal
         title={
           pathTarget?.path
-            ? `编辑路径（${pathTarget.server.name}）`
+            ? `编辑目录（${pathTarget.server.name}）`
             : pathTarget
-              ? `为 ${pathTarget.server.name} 添加部署路径`
-              : '部署路径'
+              ? `为 ${pathTarget.server.name} 添加部署目录`
+              : '部署目录'
         }
         open={Boolean(pathTarget)}
         onCancel={() => setPathTarget(null)}
@@ -263,18 +311,27 @@ export function ServersPage() {
       >
         <Form<PathForm> form={pathForm} layout="vertical" onFinish={(values) => savePath.mutate(values)}>
           <Form.Item
-            label="路径文件夹"
+            label="部署目录"
             name="path"
-            rules={[{ required: true, message: '请填写部署路径' }]}
-            extra="例如 /etc/nginx/ssl 或 E:/nginx/ssl。上传时会映射为对象存储前缀，而不是直接 SSH 写入远程磁盘。"
+            rules={[{ required: true, message: '请填写部署目录' }]}
+            extra={
+              <FieldHint example="/etc/nginx/ssl">
+                证书准备放到这台机器上的哪个文件夹。上传时会按「管理名称 / 这个目录」存到文件服务器，不会通过 SSH
+                直接写入远程磁盘。
+              </FieldHint>
+            }
           >
-            <Input placeholder="/etc/nginx/ssl" />
+            <Input placeholder="例：/etc/nginx/ssl" />
           </Form.Item>
-          <Form.Item label="备注" name="label">
-            <Input placeholder="Nginx 证书目录" />
+          <Form.Item
+            label="备注（可选）"
+            name="label"
+            extra={<FieldHint example="Nginx 证书目录">仅方便你辨认这条路径，可不填。</FieldHint>}
+          >
+            <Input placeholder="可选" />
           </Form.Item>
         </Form>
       </Modal>
-    </Space>
+    </div>
   );
 }

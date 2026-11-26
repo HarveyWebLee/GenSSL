@@ -15,7 +15,7 @@ export function PlaceholderPage({ title, description }: PlaceholderPageProps) {
       <Alert
         type="info"
         showIcon
-        message="当前为项目骨架"
+        title="当前为项目骨架"
         description="页面布局与路由已就绪，业务功能将在后续迭代中实现。"
       />
     </Card>

@@ -1,12 +1,13 @@
 import { Transform, Type } from 'class-transformer';
+import { MAX_CERT_VALIDITY_DAYS } from '../../cert-validity';
 import {
   ArrayMinSize,
   IsArray,
-  IsBoolean,
   IsIn,
   IsInt,
   IsOptional,
   IsString,
+  IsUUID,
   Max,
   MaxLength,
   Min,
@@ -16,6 +17,9 @@ const emptyToUndefined = ({ value }: { value: unknown }) =>
   value === '' || value === null ? undefined : value;
 
 export class IssueCertDto {
+  @IsUUID('4', { message: '请选择用于签发的根证书' })
+  caId!: string;
+
   @Transform(emptyToUndefined)
   @IsOptional()
   @IsString()
@@ -72,7 +76,7 @@ export class IssueCertDto {
   @Type(() => Number)
   @IsInt()
   @Min(1, { message: '有效期至少为 1 天' })
-  @Max(825, { message: '有效期最长为 825 天' })
+  @Max(MAX_CERT_VALIDITY_DAYS, { message: '有效期最长为 50 年（18250 天）' })
   days?: number;
 
   @IsOptional()
@@ -91,9 +95,4 @@ export class IssueCertDto {
   @IsString()
   @MaxLength(200)
   publicFileName?: string;
-
-  @IsOptional()
-  @Transform(({ value }) => value === true || value === 'true')
-  @IsBoolean()
-  overwrite?: boolean;
 }

@@ -7,10 +7,11 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import path from 'node:path';
 import { Repository } from 'typeorm';
+import { ArchiveService } from '../archive/archive.service';
 import { CaService } from '../ca/ca.service';
 import { CertsService } from '../certs/certs.service';
 import { ServersService } from '../servers/servers.service';
-import { buildObjectKey, buildObjectPrefix } from '../storage/object-key';
+import { buildDeployObjectKey, buildDeployObjectPrefix, DEPLOY_ROOT } from '../storage/object-key';
 import { assertSafeObjectKey, isForbiddenUploadName } from '../storage/upload-guard';
 import { RustfsService } from '../storage/rustfs.service';
 import { DeployRecordEntity, type DeployedFile, type DeployedFileKind } from './deploy-record.entity';
@@ -25,6 +26,7 @@ export class DeployService {
     private readonly serversService: ServersService,
     private readonly rustfs: RustfsService,
     private readonly caService: CaService,
+    private readonly archiveService: ArchiveService,
   ) {}
 
   async list() {
@@ -49,7 +51,7 @@ export class DeployService {
   async listTargetFiles(serverId: string, pathId: string) {
     const server = await this.serversService.findServer(serverId);
     const deployPath = await this.serversService.findPath(serverId, pathId);
-    const prefix = buildObjectPrefix(server.name, deployPath.path);
+    const prefix = buildDeployObjectPrefix(server.name, deployPath.path);
     const files = await this.rustfs.listPrefix(prefix);
     const latest = await this.repo.findOne({
       where: { serverId, pathId },
@@ -57,6 +59,8 @@ export class DeployService {
       relations: { certificate: true, server: true, path: true },
     });
     return {
+      storageKind: 'deploy' as const,
+      storageLabel: '服务器部署目录',
       server: { id: server.id, name: server.name, host: server.host },
       path: { id: deployPath.id, path: deployPath.path, label: deployPath.label },
       prefix,
@@ -64,6 +68,7 @@ export class DeployService {
         ...file,
         fileName: file.key.slice(prefix.length + 1),
         kind: this.guessKind(file.key),
+        storageKind: 'deploy' as const,
       })),
       latestDeploy: latest ? this.toDto(latest) : null,
     };
@@ -74,7 +79,7 @@ export class DeployService {
     const certificate = await this.certsService.findRecord(dto.certificateId);
     const server = await this.serversService.findServer(dto.serverId);
     const deployPath = await this.serversService.findPath(dto.serverId, dto.pathId);
-    const material = await this.certsService.readLocalMaterial(certificate.name);
+    const material = await this.certsService.readArchiveMaterial(certificate.id);
 
     const planned: Array<{ kind: DeployedFileKind; fileName: string; body: string; contentType: string }> = [
       {
@@ -92,12 +97,11 @@ export class DeployService {
     ];
 
     if (dto.includeRootCaCert) {
-      const caPem = await this.caService.readCertificatePem();
-      const caName = await this.caService.getPublicFileName();
+      const { row } = await this.caService.loadPublicMaterial(certificate.caId);
       planned.push({
         kind: 'ca-cert',
-        fileName: caName,
-        body: caPem,
+        fileName: row.publicFileName,
+        body: row.certificatePem,
         contentType: 'application/x-x509-ca-cert',
       });
     }
@@ -105,13 +109,13 @@ export class DeployService {
     for (const item of planned) {
       if (isForbiddenUploadName(item.fileName)) {
         throw new BadRequestException(
-          '禁止上传 rootCA.key。根 CA 私钥不会出现在部署包或文件服务器中。',
+          '禁止上传 rootCA.key。根 CA 私钥只保存在数据库中，不会出现在部署目录或证书库中。',
         );
       }
     }
 
-    const prefix = buildObjectPrefix(server.name, deployPath.path);
-    const keys = planned.map((item) => buildObjectKey(server.name, deployPath.path, item.fileName));
+    const prefix = buildDeployObjectPrefix(server.name, deployPath.path);
+    const keys = planned.map((item) => buildDeployObjectKey(server.name, deployPath.path, item.fileName));
 
     if (!dto.overwrite) {
       const existing: string[] = [];
@@ -122,14 +126,14 @@ export class DeployService {
       }
       if (existing.length > 0) {
         throw new ConflictException(
-          `目标路径下已有文件：${existing.join('，')}。如需覆盖，请确认后开启覆盖选项。`,
+          `该服务器部署目录下已有文件：${existing.join('，')}。如需覆盖，请确认后开启覆盖选项。`,
         );
       }
     }
 
     const uploaded: DeployedFile[] = [];
     for (const item of planned) {
-      const objectKey = buildObjectKey(server.name, deployPath.path, item.fileName);
+      const objectKey = buildDeployObjectKey(server.name, deployPath.path, item.fileName);
       const stored = await this.rustfs.putObject(objectKey, item.body, item.contentType);
       uploaded.push({
         kind: item.kind,
@@ -153,7 +157,7 @@ export class DeployService {
 
   async openStoredFile(objectKey: string) {
     const key = assertSafeObjectKey(objectKey);
-    return this.rustfs.getObjectStream(key);
+    return this.archiveService.openStoredFile(key);
   }
 
   private guessKind(objectKey: string): DeployedFileKind | 'unknown' {
@@ -176,6 +180,8 @@ export class DeployService {
   private toDto(row: DeployRecordEntity) {
     return {
       id: row.id,
+      storageKind: 'deploy' as const,
+      storageLabel: '服务器部署目录',
       certificate: row.certificate
         ? {
             id: row.certificate.id,
@@ -183,6 +189,7 @@ export class DeployService {
             commonName: row.certificate.commonName,
             publicFileName: row.certificate.publicFileName,
             keyFileName: row.certificate.keyFileName,
+            caId: row.certificate.caId,
           }
         : { id: row.certificateId },
       server: row.server
@@ -196,7 +203,7 @@ export class DeployService {
       overwritten: row.overwritten,
       createdAt: row.createdAt.toISOString(),
       warning:
-        '上传内容面向目标服务器的部署目录。server.key 只用于部署到对应 Nginx，不要分发给客户端。rootCA.key 从未上传。当前是写入 RustFS 对象存储中的服务器/路径前缀，而不是通过 SSH 直接写入远程磁盘。',
+        `这是「部署到服务器 cert 目录」，对象前缀以 ${DEPLOY_ROOT}/ 开头，与证书库（archive/）分开。server.key 只用于拷到对应 Nginx，不要分发给客户端。rootCA.key 从未上传。当前是写入 RustFS 中的服务器部署前缀，而不是通过 SSH 直接写入远程磁盘。`,
     };
   }
 }

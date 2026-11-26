@@ -1,6 +1,6 @@
 import { Transform, Type } from 'class-transformer';
+import { MAX_CERT_VALIDITY_DAYS } from '../../cert-validity';
 import {
-  IsBoolean,
   IsEmail,
   IsIn,
   IsInt,
@@ -11,6 +11,7 @@ import {
   Max,
   MaxLength,
   Min,
+  MinLength,
 } from 'class-validator';
 
 const emptyToUndefined = ({ value }: { value: unknown }) =>
@@ -23,6 +24,11 @@ export type CaKeySize = (typeof CA_KEY_SIZES)[number];
 export type CaHashAlgorithm = (typeof CA_HASH_ALGORITHMS)[number];
 
 export class CreateCaDto {
+  @IsString({ message: '根证书名称必须是字符串' })
+  @MinLength(1, { message: '请填写根证书名称' })
+  @MaxLength(128, { message: '根证书名称长度不能超过 128 个字符' })
+  name!: string;
+
   @Transform(emptyToUndefined)
   @IsOptional()
   @IsString({ message: '国家代码必须是字符串' })
@@ -75,7 +81,7 @@ export class CreateCaDto {
   @Type(() => Number)
   @IsInt({ message: '有效期必须是整数天数' })
   @Min(1, { message: '有效期至少为 1 天' })
-  @Max(3650, { message: '有效期最长为 3650 天' })
+  @Max(MAX_CERT_VALIDITY_DAYS, { message: '有效期最长为 50 年（18250 天）' })
   days?: number;
 
   @Transform(emptyToUndefined)
@@ -99,9 +105,4 @@ export class CreateCaDto {
   @IsString({ message: '公共文件名必须是字符串' })
   @MaxLength(200, { message: '公共文件名长度不能超过 200 个字符' })
   publicFileName?: string;
-
-  @IsOptional()
-  @Transform(({ value }) => value === true || value === 'true')
-  @IsBoolean({ message: 'overwrite 必须是布尔值' })
-  overwrite?: boolean;
 }

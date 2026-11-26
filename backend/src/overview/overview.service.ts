@@ -1,13 +1,9 @@
 import { Injectable } from '@nestjs/common';
+import { ArchiveService } from '../archive/archive.service';
 import { CaService } from '../ca/ca.service';
-import type { CaDetails } from '../ca/ca.types';
 import { CertsService } from '../certs/certs.service';
 import { ServersService } from '../servers/servers.service';
 import { RustfsService } from '../storage/rustfs.service';
-
-function isCaDetails(status: Awaited<ReturnType<CaService['getStatus']>>): status is CaDetails {
-  return status.exists === true && status.incomplete !== true;
-}
 
 @Injectable()
 export class OverviewService {
@@ -16,30 +12,82 @@ export class OverviewService {
     private readonly certsService: CertsService,
     private readonly serversService: ServersService,
     private readonly rustfs: RustfsService,
+    private readonly archiveService: ArchiveService,
   ) {}
 
   async getOverview() {
-    const [ca, certificateCount, serverCount] = await Promise.all([
-      this.caService.getStatus(),
-      this.certsService.count(),
+    const [cas, certs, serverCount, storageCounts] = await Promise.all([
+      this.caService.list(),
+      this.certsService.list(),
       this.serversService.count(),
+      this.archiveService.countByKind(),
     ]);
 
-    const details = isCaDetails(ca) ? ca : undefined;
-
+    const statuses = certs.items.map((item) => item.status);
     return {
-      ca: {
-        exists: ca.exists === true,
-        ready: Boolean(details),
-        incomplete: ca.exists === true && ca.incomplete === true,
-        commonName: details?.subject.commonName,
-        notBefore: details?.notBefore,
-        notAfter: details?.notAfter,
-        publicFileName: details?.publicFileName,
+      cas: {
+        total: cas.items.length,
+        active: cas.activeCount,
+        retired: cas.retiredCount,
+        ready: cas.activeCount > 0,
+        items: cas.items.map((item) => ({
+          id: item.id,
+          name: item.name,
+          commonName: item.commonName,
+          status: item.status,
+          notAfter: item.notAfter,
+          publicFileName: item.publicFileName,
+          certificateCount: item.certificateCount,
+          validCertificateCount: item.validCertificateCount,
+          needsReissueCount: item.needsReissueCount,
+          archive: item.archive,
+        })),
       },
-      certificateCount,
+      certificateCount: certs.items.length,
+      validCertificateCount: statuses.filter((status) => status === 'valid').length,
+      needsReissueCount: statuses.filter((status) => status === 'needs_reissue').length,
+      expiredCertificateCount: statuses.filter((status) => status === 'expired').length,
       serverCount,
-      storage: this.rustfs.getStatus(),
+      storage: {
+        ...this.rustfs.getStatus(),
+        archive: storageCounts.archive,
+        deploy: storageCounts.deploy,
+      },
+    };
+  }
+
+  async getArchiveLibrary() {
+    const [cas, certs] = await Promise.all([this.caService.list(), this.certsService.list()]);
+    let rustfsFiles: { cas: unknown[]; certs: unknown[] } | null = null;
+    const storage = this.rustfs.getStatus();
+    if (storage.ready) {
+      const listed = await this.archiveService.listLibrary();
+      rustfsFiles = { cas: listed.cas, certs: listed.certs };
+    }
+    return {
+      storageKind: 'archive' as const,
+      storageLabel: '证书库',
+      prefix: 'archive/',
+      storage,
+      rustfsFiles,
+      cas: cas.items.map((item) => ({
+        id: item.id,
+        name: item.name,
+        status: item.status,
+        publicFileName: item.publicFileName,
+        archive: item.archive,
+      })),
+      certificates: certs.items.map((item) => ({
+        id: item.id,
+        name: item.name,
+        ca: item.ca,
+        publicFileName: item.publicFileName,
+        keyFileName: item.keyFileName,
+        status: item.status,
+        statusLabel: item.statusLabel,
+        archive: item.archive,
+      })),
+      note: '证书库用于保存平台管理的证书档案，与「部署到服务器 cert 目录」（deploy/）完全分开。rootCA.key 不会出现在这里。',
     };
   }
 }

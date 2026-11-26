@@ -1,4 +1,5 @@
 export type CaHashAlgorithm = 'sha256' | 'sha384' | 'sha512';
+export type RootCaLifecycleStatus = 'active' | 'retired';
 
 export interface CaSubjectInfo {
   country?: string;
@@ -10,16 +11,25 @@ export interface CaSubjectInfo {
   emailAddress?: string;
 }
 
-export interface CaDetails {
-  exists: true;
-  incomplete?: false;
+export interface ArchiveStatus {
+  storageKind: 'archive';
+  storageLabel: '证书库';
+  uploaded: boolean;
+  objectKey: string | null;
+  uploadedAt: string | null;
+}
+
+export interface RootCaSummary {
+  id: string;
+  name: string;
+  commonName: string;
   subject: CaSubjectInfo;
   issuer: CaSubjectInfo;
   notBefore: string;
   notAfter: string;
   serialNumber: string;
   signatureAlgorithm: string;
-  isCA: boolean;
+  isCA: true;
   keyUsage: string[];
   pathLenConstraint: number | null;
   fingerprintSha256: string;
@@ -27,16 +37,21 @@ export interface CaDetails {
   publicKeyBits: number;
   publicFileName: string;
   suggestedFileName: string;
+  status: RootCaLifecycleStatus;
+  retiredAt: string | null;
+  certificateCount: number;
+  validCertificateCount: number;
+  needsReissueCount: number;
+  archive: ArchiveStatus;
+  createdAt: string;
+  updatedAt: string;
 }
 
-export interface CaIncomplete {
-  exists: true;
-  incomplete: true;
-  message: string;
+export interface CaSigningMaterial {
+  id: string;
+  name: string;
+  certPem: string;
+  keyPem: string;
+  publicFileName: string;
+  status: RootCaLifecycleStatus;
 }
-
-export interface CaAbsent {
-  exists: false;
-}
-
-export type CaStatus = CaDetails | CaIncomplete | CaAbsent;

@@ -15,7 +15,7 @@ export function assertSafeUploadFileName(fileName: string): string {
   }
   if (isForbiddenUploadName(trimmed)) {
     throw new BadRequestException(
-      '禁止上传 rootCA.key。根 CA 私钥只能保存在证书管理端本机，不得入库，也不得上传到文件服务器。',
+      '禁止上传 rootCA.key。根 CA 私钥只保存在数据库中，不得入库到 RustFS，也不得提供下载。',
     );
   }
   return trimmed;
@@ -35,7 +35,7 @@ export function assertSafeObjectKey(objectKey: string): string {
   }
   if (isForbiddenUploadName(trimmed)) {
     throw new BadRequestException(
-      '禁止上传或下载 rootCA.key。根 CA 私钥不得出现在文件服务器中。',
+      '禁止上传或下载 rootCA.key。根 CA 私钥只保存在数据库中，不得出现在文件服务器中。',
     );
   }
   return trimmed;

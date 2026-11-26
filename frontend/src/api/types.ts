@@ -1,6 +1,8 @@
 export type CaKeySize = 2048 | 4096 | 8192;
 export type CaHashAlgorithm = 'sha256' | 'sha384' | 'sha512';
 export type CaCertFormat = 'crt' | 'cer' | 'pem';
+export type RootCaLifecycleStatus = 'active' | 'retired';
+export type CertificateLifecycleStatus = 'valid' | 'expired' | 'not_yet_valid' | 'needs_reissue';
 
 export interface CaSubjectInfo {
   country?: string;
@@ -13,6 +15,7 @@ export interface CaSubjectInfo {
 }
 
 export interface CreateCaPayload {
+  name: string;
   country?: string;
   stateOrProvince?: string;
   locality?: string;
@@ -26,19 +29,30 @@ export interface CreateCaPayload {
   hashAlgorithm?: CaHashAlgorithm;
   pathLenConstraint?: number;
   publicFileName?: string;
-  overwrite?: boolean;
 }
 
-export interface CaDetails {
-  exists: true;
-  incomplete?: false;
+export interface ArchiveStatus {
+  storageKind: 'archive';
+  storageLabel: '证书库';
+  uploaded: boolean;
+  objectKey?: string | null;
+  objectPrefix?: string | null;
+  certObjectKey?: string | null;
+  keyObjectKey?: string | null;
+  uploadedAt: string | null;
+}
+
+export interface RootCaSummary {
+  id: string;
+  name: string;
+  commonName: string;
   subject: CaSubjectInfo;
   issuer: CaSubjectInfo;
   notBefore: string;
   notAfter: string;
   serialNumber: string;
   signatureAlgorithm: string;
-  isCA: boolean;
+  isCA: true;
   keyUsage: string[];
   pathLenConstraint: number | null;
   fingerprintSha256: string;
@@ -46,22 +60,20 @@ export interface CaDetails {
   publicKeyBits: number;
   publicFileName: string;
   suggestedFileName: string;
+  status: RootCaLifecycleStatus;
+  retiredAt: string | null;
+  certificateCount: number;
+  validCertificateCount: number;
+  needsReissueCount: number;
+  archive: ArchiveStatus;
+  createdAt: string;
+  updatedAt: string;
 }
 
-export interface CaIncomplete {
-  exists: true;
-  incomplete: true;
-  message: string;
-}
-
-export interface CaAbsent {
-  exists: false;
-}
-
-export type CaStatus = CaDetails | CaIncomplete | CaAbsent;
-
-export function isCaDetails(status: CaStatus): status is CaDetails {
-  return status.exists === true && status.incomplete !== true;
+export interface CaListResponse {
+  items: RootCaSummary[];
+  activeCount: number;
+  retiredCount: number;
 }
 
 export interface GenerateNginxPayload {
@@ -73,7 +85,15 @@ export interface GenerateNginxPayload {
   sslCertificateKey?: string;
 }
 
+export interface NginxConfigResult {
+  implemented: boolean;
+  config: string;
+  note?: string;
+  cas?: Array<{ id: string; name: string; status: RootCaLifecycleStatus; publicFileName: string }>;
+}
+
 export interface IssueCertPayload {
+  caId: string;
   name?: string;
   ips: string[];
   dnsNames?: string[];
@@ -87,7 +107,6 @@ export interface IssueCertPayload {
   keySize?: 2048 | 4096;
   hashAlgorithm?: CaHashAlgorithm;
   publicFileName?: string;
-  overwrite?: boolean;
 }
 
 export interface CertVerification {
@@ -103,6 +122,14 @@ export interface CertVerification {
   sanDisplay: string;
   ips: string[];
   dnsNames: string[];
+}
+
+export interface CertificateCaRef {
+  id: string;
+  name: string;
+  commonName: string;
+  status: RootCaLifecycleStatus;
+  publicFileName: string;
 }
 
 export interface CertificateSummary {
@@ -121,7 +148,10 @@ export interface CertificateSummary {
   keyFileName: string;
   publicKeyBits: number;
   createdAt: string;
-  filesPresent: boolean;
+  ca: CertificateCaRef;
+  status: CertificateLifecycleStatus;
+  statusLabel: string;
+  archive: ArchiveStatus;
 }
 
 export interface CertificateDetail extends CertificateSummary {
@@ -159,7 +189,16 @@ export interface DeployedFile {
 
 export interface DeployRecord {
   id: string;
-  certificate: { id: string; name?: string; commonName?: string; publicFileName?: string; keyFileName?: string };
+  storageKind: 'deploy';
+  storageLabel: string;
+  certificate: {
+    id: string;
+    name?: string;
+    commonName?: string;
+    publicFileName?: string;
+    keyFileName?: string;
+    caId?: string;
+  };
   server: { id: string; name?: string; host?: string | null };
   path: { id: string; path?: string; label?: string | null };
   objectPrefix: string;
@@ -170,6 +209,8 @@ export interface DeployRecord {
 }
 
 export interface TargetFileList {
+  storageKind: 'deploy';
+  storageLabel: string;
   server: { id: string; name: string; host: string | null };
   path: { id: string; path: string; label: string | null };
   prefix: string;
@@ -179,26 +220,76 @@ export interface TargetFileList {
     lastModified?: string;
     fileName: string;
     kind: 'server-cert' | 'server-key' | 'ca-cert' | 'unknown';
+    storageKind?: 'deploy';
   }>;
   latestDeploy: DeployRecord | null;
 }
 
+export interface StorageKindStats {
+  storageKind: 'archive' | 'deploy';
+  storageLabel: string;
+  prefix: string;
+  objectCount: number | null;
+}
+
 export interface OverviewData {
-  ca: {
-    exists: boolean;
+  cas: {
+    total: number;
+    active: number;
+    retired: number;
     ready: boolean;
-    incomplete: boolean;
-    commonName?: string;
-    notBefore?: string;
-    notAfter?: string;
-    publicFileName?: string;
+    items: Array<{
+      id: string;
+      name: string;
+      commonName: string;
+      status: RootCaLifecycleStatus;
+      notAfter: string;
+      publicFileName: string;
+      certificateCount: number;
+      validCertificateCount: number;
+      needsReissueCount: number;
+      archive: ArchiveStatus;
+    }>;
   };
   certificateCount: number;
+  validCertificateCount: number;
+  needsReissueCount: number;
+  expiredCertificateCount: number;
   serverCount: number;
   storage: {
     ready: boolean;
     endpoint?: string;
     bucket?: string;
     lastError?: string | null;
+    archive: StorageKindStats;
+    deploy: StorageKindStats;
   };
+}
+
+export interface ArchiveLibrary {
+  storageKind: 'archive';
+  storageLabel: string;
+  prefix: string;
+  storage: { ready: boolean; endpoint?: string; bucket?: string; lastError?: string | null };
+  rustfsFiles: { cas: Array<{ key: string; size: number }>; certs: Array<{ key: string; size: number }> } | null;
+  cas: Array<{ id: string; name: string; status: RootCaLifecycleStatus; publicFileName: string; archive: ArchiveStatus }>;
+  certificates: Array<{
+    id: string;
+    name: string;
+    ca: CertificateCaRef;
+    publicFileName: string;
+    keyFileName: string;
+    status: CertificateLifecycleStatus;
+    statusLabel: string;
+    archive: ArchiveStatus;
+  }>;
+  note: string;
+}
+
+export interface WindowsTrustGuide {
+  implemented: boolean;
+  selectedCa: { id: string; name: string; status: RootCaLifecycleStatus; publicFileName: string } | null;
+  cas: Array<{ id: string; name: string; status: RootCaLifecycleStatus; publicFileName: string }>;
+  steps: string[];
+  warning: string;
 }

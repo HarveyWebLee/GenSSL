@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ArchiveModule } from '../archive/archive.module';
 import { CaModule } from '../ca/ca.module';
 import { CertsModule } from '../certs/certs.module';
 import { ServersModule } from '../servers/servers.module';
@@ -15,6 +16,7 @@ import { DeployService } from './deploy.service';
     ServersModule,
     StorageModule,
     CaModule,
+    ArchiveModule,
   ],
   controllers: [DeployController],
   providers: [DeployService],

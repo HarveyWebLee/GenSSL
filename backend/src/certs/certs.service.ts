@@ -1,27 +1,24 @@
 import {
   BadRequestException,
   ConflictException,
-  Inject,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
-  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { createReadStream, existsSync } from 'node:fs';
-import type { ReadStream } from 'node:fs';
-import { mkdir, readFile, rm, writeFile, chmod } from 'node:fs/promises';
-import path from 'node:path';
-import { PassThrough } from 'node:stream';
+import { randomUUID } from 'node:crypto';
+import { PassThrough, Readable } from 'node:stream';
 import archiver from 'archiver';
 import * as forge from 'node-forge';
 import { Repository } from 'typeorm';
+import { ArchiveService } from '../archive/archive.service';
 import { CaService } from '../ca/ca.service';
 import {
   buildContentDisposition,
   contentTypeForFormat,
   sanitizePublicBasename,
 } from '../ca/ca-filename';
+import type { RootCaLifecycleStatus } from '../ca/root-ca.entity';
 import { IssueCertDto } from './dto/issue-cert.dto';
 import { IssuedCertificateEntity } from './issued-certificate.entity';
 import {
@@ -30,6 +27,11 @@ import {
   resolveServerCertPublicFileName,
   resolveServerKeyDownloadName,
 } from './cert-filename';
+import {
+  computeCertificateStatus,
+  certificateStatusLabel,
+  type CertificateLifecycleStatus,
+} from './cert-status';
 import {
   attrsToSubject,
   generateRsaKeyPair,
@@ -42,7 +44,13 @@ import {
 } from './issue-server-cert';
 import { normalizeSan, type NormalizedSan } from './san';
 
-export const CERTS_DATA_DIR = 'CERTS_DATA_DIR';
+export interface CertificateCaRef {
+  id: string;
+  name: string;
+  commonName: string;
+  status: RootCaLifecycleStatus;
+  publicFileName: string;
+}
 
 export interface CertificateSummary {
   id: string;
@@ -60,7 +68,18 @@ export interface CertificateSummary {
   keyFileName: string;
   publicKeyBits: number;
   createdAt: string;
-  filesPresent: boolean;
+  ca: CertificateCaRef;
+  status: CertificateLifecycleStatus;
+  statusLabel: string;
+  archive: {
+    storageKind: 'archive';
+    storageLabel: '证书库';
+    uploaded: boolean;
+    objectPrefix: string | null;
+    certObjectKey: string | null;
+    keyObjectKey: string | null;
+    uploadedAt: string | null;
+  };
 }
 
 export interface CertificateDetail extends CertificateSummary {
@@ -72,7 +91,7 @@ export interface CertificateDetail extends CertificateSummary {
 }
 
 export interface FileDownload {
-  stream: ReadStream | PassThrough;
+  stream: Readable | PassThrough;
   filename: string;
   contentType: string;
   contentDisposition: string;
@@ -81,52 +100,34 @@ export interface FileDownload {
 
 @Injectable()
 export class CertsService {
-  private readonly certsDir: string;
-
   constructor(
     private readonly caService: CaService,
+    private readonly archiveService: ArchiveService,
     @InjectRepository(IssuedCertificateEntity)
     private readonly repo: Repository<IssuedCertificateEntity>,
-    @Optional() @Inject(CERTS_DATA_DIR) dataDir?: string,
-  ) {
-    const resolved =
-      dataDir?.trim() ||
-      process.env.CERTS_DATA_DIR?.trim() ||
-      path.join(process.cwd(), 'data', 'ssl-ca', 'certs');
-    this.certsDir = path.resolve(resolved);
-  }
-
-  getCertDir(name: string): string {
-    return path.join(this.certsDir, name);
-  }
-
-  getCertPath(name: string): string {
-    return path.join(this.getCertDir(name), 'server.crt');
-  }
-
-  getKeyPath(name: string): string {
-    return path.join(this.getCertDir(name), 'server.key');
-  }
+  ) {}
 
   async list(): Promise<{ items: CertificateSummary[] }> {
-    const rows = await this.repo.find({ order: { createdAt: 'DESC' } });
-    return {
-      items: rows.map((row) => this.toSummary(row)),
-    };
+    const rows = await this.repo.find({ relations: { ca: true }, order: { createdAt: 'DESC' } });
+    const items = [];
+    for (const row of rows) {
+      items.push(this.toSummary(await this.hydrateCa(row)));
+    }
+    return { items };
   }
 
   async issue(dto: IssueCertDto): Promise<CertificateDetail> {
-    const ca = await this.caService.loadSigningMaterial();
+    this.archiveService.assertReady();
+    const ca = await this.caService.loadSigningMaterial(dto.caId);
     const san = normalizeSan({ ips: dto.ips, dnsNames: dto.dnsNames });
     const caSubject = attrsToSubject(ca.cert.subject.attributes);
-
     const commonName = (dto.commonName?.trim() || san.ips[0]) as string;
     const name = this.resolveRecordName(dto.name, commonName, san.ips[0]);
 
-    const existing = await this.repo.findOne({ where: { name } });
-    if ((existing || existsSync(this.getCertDir(name))) && !dto.overwrite) {
+    const existing = await this.repo.findOne({ where: { caId: ca.id, name } });
+    if (existing) {
       throw new ConflictException(
-        `名为「${name}」的服务器证书已存在。如需覆盖，请确认后开启覆盖选项。覆盖不会删除根 CA，但会使该名称下旧的服务器证书失效。`,
+        `根证书「${ca.name}」下已有名为「${name}」的服务器证书。请使用不同名称另行签发，以保留历史记录。`,
       );
     }
 
@@ -136,17 +137,11 @@ export class CertsService {
       firstIp: san.ips[0],
     });
     const keyFileName = deriveServerKeyFileName(publicFileName, 'key');
-
     const days = dto.days ?? SERVER_CERT_DEFAULTS.days;
     const keySize = dto.keySize ?? SERVER_CERT_DEFAULTS.keySize;
     const keys = await generateRsaKeyPair(keySize);
-    const existingSerials = new Set(
-      (await this.repo.find({ select: ['serialNumber'] })).map((row) => row.serialNumber),
-    );
-    if (existing) {
-      existingSerials.delete(existing.serialNumber);
-    }
 
+    const existingSerials = new Set((await this.repo.find({ select: ['serialNumber'] })).map((row) => row.serialNumber));
     const issued = issueServerCertificate({
       caCert: ca.cert,
       caKey: ca.key,
@@ -178,49 +173,80 @@ export class CertsService {
       );
     }
 
-    await this.writeCertFiles(name, issued.certPem, issued.keyPem);
-
-    const row = existing ?? this.repo.create({ name });
-    row.commonName = commonName;
-    row.ips = san.ips;
-    row.dnsNames = san.dnsNames;
-    row.days = days;
-    row.notBefore = issued.notBefore;
-    row.notAfter = issued.notAfter;
-    row.serialNumber = String(issued.cert.serialNumber).toLowerCase();
-    row.fingerprintSha256 = sha256Fingerprint(issued.cert);
-    row.signatureAlgorithm = 'sha256WithRSAEncryption';
-    if (dto.hashAlgorithm === 'sha384') {
-      row.signatureAlgorithm = 'sha384WithRSAEncryption';
-    } else if (dto.hashAlgorithm === 'sha512') {
-      row.signatureAlgorithm = 'sha512WithRSAEncryption';
-    }
-    row.publicKeyBits = keySize;
-    row.subject = attrsToSubject(issued.cert.subject.attributes) as Record<string, string>;
-    row.publicFileName = publicFileName;
-    row.keyFileName = keyFileName;
-    row.sanDisplay = issued.sanDisplay;
-    await this.repo.save(row);
-
-    return this.getDetail(name);
-  }
-
-  async getDetail(nameOrId: string): Promise<CertificateDetail> {
-    const row = await this.findRecord(nameOrId);
-    const ca = await this.caService.loadSigningMaterial();
-    const { cert, key } = await this.readLocalMaterial(row.name);
-    const expected: NormalizedSan = { ips: row.ips, dnsNames: row.dnsNames };
-    const verification = verifyServerCertificate({
-      cert,
-      caCert: ca.cert,
-      privateKey: key,
-      expectedSan: expected,
+    const id = randomUUID();
+    const archived = await this.archiveService.archiveServerCertificate({
+      caId: ca.id,
+      certId: id,
+      certFileName: publicFileName,
+      keyFileName,
+      certPem: issued.certPem,
+      keyPem: issued.keyPem,
     });
 
+    let signatureAlgorithm = 'sha256WithRSAEncryption';
+    if (dto.hashAlgorithm === 'sha384') {
+      signatureAlgorithm = 'sha384WithRSAEncryption';
+    } else if (dto.hashAlgorithm === 'sha512') {
+      signatureAlgorithm = 'sha512WithRSAEncryption';
+    }
+
+    const row = this.repo.create({
+      id,
+      caId: ca.id,
+      name,
+      commonName,
+      ips: san.ips,
+      dnsNames: san.dnsNames,
+      days,
+      notBefore: issued.notBefore,
+      notAfter: issued.notAfter,
+      serialNumber: String(issued.cert.serialNumber).toLowerCase(),
+      fingerprintSha256: sha256Fingerprint(issued.cert),
+      signatureAlgorithm,
+      publicKeyBits: keySize,
+      subject: attrsToSubject(issued.cert.subject.attributes) as Record<string, string>,
+      publicFileName,
+      keyFileName,
+      sanDisplay: issued.sanDisplay,
+      certificatePem: issued.certPem,
+      archiveObjectPrefix: archived.prefix,
+      archiveCertObjectKey: archived.certObjectKey,
+      archiveKeyObjectKey: archived.keyObjectKey,
+      archiveUploadedAt: new Date(),
+    });
+    await this.repo.save(row);
+    return this.getDetail(id);
+  }
+
+  async getDetail(id: string): Promise<CertificateDetail> {
+    const row = await this.findRecord(id);
+    const { cert, certPem, row: caRow } = await this.caService.loadPublicMaterial(row.caId);
+    const expected: NormalizedSan = { ips: row.ips, dnsNames: row.dnsNames };
+    let privateKey: forge.pki.rsa.PrivateKey | undefined;
+    try {
+      if (row.archiveKeyObjectKey) {
+        const keyPem = await this.archiveService.readText(row.archiveKeyObjectKey);
+        privateKey = forge.pki.privateKeyFromPem(keyPem) as forge.pki.rsa.PrivateKey;
+      }
+    } catch {
+      privateKey = undefined;
+    }
+    const issuedCert = forge.pki.certificateFromPem(row.certificatePem);
+    const verification = verifyServerCertificate({
+      cert: issuedCert,
+      caCert: cert,
+      privateKey,
+      expectedSan: expected,
+    });
+    if (!privateKey) {
+      verification.messages = [...verification.messages, '未能从证书库读取服务器私钥，已跳过私钥匹配校验。'];
+    }
+
+    const summary = this.toSummary(row);
     return {
-      ...this.toSummary(row),
+      ...summary,
       subject: row.subject,
-      issuer: attrsToSubject(ca.cert.subject.attributes) as Record<string, string>,
+      issuer: (caRow.subject ?? attrsToSubject(cert.subject.attributes)) as Record<string, string>,
       signatureAlgorithm: row.signatureAlgorithm,
       isCA: false,
       verification,
@@ -228,11 +254,13 @@ export class CertsService {
   }
 
   async openDownload(
-    nameOrId: string,
+    id: string,
     options?: { part?: 'bundle' | 'cert' | 'key'; filename?: string; format?: string },
   ): Promise<FileDownload> {
-    const row = await this.findRecord(nameOrId);
-    await this.assertFilesPresent(row.name);
+    const row = await this.findRecord(id);
+    if (!row.archiveCertObjectKey || !row.archiveKeyObjectKey) {
+      throw new NotFoundException(`证书「${row.name}」尚未上传到证书库，无法下载。`);
+    }
     const part = options?.part ?? 'bundle';
 
     if (part === 'cert') {
@@ -241,8 +269,9 @@ export class CertsService {
         filename: options?.filename,
         format: options?.format,
       });
+      const pem = row.certificatePem;
       return {
-        stream: createReadStream(this.getCertPath(row.name)),
+        stream: Readable.from(Buffer.from(pem, 'utf8')),
         filename,
         contentType: contentTypeForFormat(format),
         contentDisposition: buildContentDisposition(filename),
@@ -255,25 +284,28 @@ export class CertsService {
         filename: options?.filename,
         format: options?.format,
       });
+      const keyPem = await this.archiveService.readText(row.archiveKeyObjectKey);
       return {
-        stream: createReadStream(this.getKeyPath(row.name)),
+        stream: Readable.from(Buffer.from(keyPem, 'utf8')),
         filename,
         contentType: 'application/x-pem-file',
         contentDisposition: buildContentDisposition(filename),
         warning:
-          '此文件是服务器私钥，只用于部署到对应 Nginx 服务器，不要分发给客户端，也不要与 rootCA.key 混淆。',
+          '此文件是服务器私钥，只用于部署到对应 Nginx 服务器，不要分发给客户端，也不要与 rootCA.key 混淆。根 CA 私钥不会提供下载。',
       };
     }
 
     const zipName = this.bundleFileName(row, options?.filename);
+    const certPem = row.certificatePem;
+    const keyPem = await this.archiveService.readText(row.archiveKeyObjectKey);
     const archive = archiver('zip', { zlib: { level: 9 } });
     const passthrough = new PassThrough();
     archive.on('error', (error) => {
       passthrough.destroy(error);
     });
     archive.pipe(passthrough);
-    archive.file(this.getCertPath(row.name), { name: row.publicFileName });
-    archive.file(this.getKeyPath(row.name), { name: row.keyFileName });
+    archive.append(certPem, { name: row.publicFileName });
+    archive.append(keyPem, { name: row.keyFileName });
     void archive.finalize();
 
     return {
@@ -282,44 +314,71 @@ export class CertsService {
       contentType: 'application/zip',
       contentDisposition: buildContentDisposition(zipName),
       warning:
-        '压缩包中包含服务器证书与服务器私钥（server.key），只用于部署到对应 Nginx，不要分发给客户端。压缩包绝不包含 rootCA.key。',
+        '压缩包中包含服务器证书与服务器私钥，只用于部署到对应 Nginx，不要分发给客户端。压缩包绝不包含 rootCA.key。',
     };
   }
 
-  async readLocalMaterial(name: string): Promise<{
-    cert: forge.pki.Certificate;
-    key: forge.pki.rsa.PrivateKey;
+  async readArchiveMaterial(id: string): Promise<{
     certPem: string;
     keyPem: string;
+    publicFileName: string;
+    keyFileName: string;
+    caId: string;
   }> {
-    await this.assertFilesPresent(name);
-    const certPem = await readFile(this.getCertPath(name), 'utf8');
-    const keyPem = await readFile(this.getKeyPath(name), 'utf8');
+    const row = await this.findRecord(id);
+    if (!row.archiveKeyObjectKey) {
+      throw new NotFoundException(`证书「${row.name}」尚未进入证书库，无法部署。请先确认文件服务器可用后重新签发。`);
+    }
+    const keyPem = await this.archiveService.readText(row.archiveKeyObjectKey);
     return {
-      cert: forge.pki.certificateFromPem(certPem),
-      key: forge.pki.privateKeyFromPem(keyPem) as forge.pki.rsa.PrivateKey,
-      certPem,
+      certPem: row.certificatePem,
       keyPem,
+      publicFileName: row.publicFileName,
+      keyFileName: row.keyFileName,
+      caId: row.caId,
     };
   }
 
-  async findRecord(nameOrId: string): Promise<IssuedCertificateEntity> {
+  async findRecord(idOrName: string): Promise<IssuedCertificateEntity> {
     const uuidRe =
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-    const row = uuidRe.test(nameOrId)
-      ? await this.repo.findOne({ where: [{ id: nameOrId }, { name: nameOrId }] })
-      : await this.repo.findOne({ where: { name: nameOrId } });
+    const row = uuidRe.test(idOrName)
+      ? await this.repo.findOne({
+          where: [{ id: idOrName }, { name: idOrName }],
+          relations: { ca: true },
+        })
+      : await this.repo.findOne({ where: { name: idOrName }, relations: { ca: true } });
     if (!row) {
-      throw new NotFoundException(`未找到名为「${nameOrId}」的服务器证书。`);
+      throw new NotFoundException(`未找到该服务器证书。`);
     }
-    return row;
+    return this.hydrateCa(row);
   }
 
   async count(): Promise<number> {
     return this.repo.count();
   }
 
+  async listSerialNumbers(): Promise<string[]> {
+    const rows = await this.repo.find({ select: ['serialNumber'] });
+    return rows.map((row) => row.serialNumber);
+  }
+
+  private async hydrateCa(row: IssuedCertificateEntity): Promise<IssuedCertificateEntity> {
+    if (row.ca) {
+      return row;
+    }
+    const ca = await this.caService.findRecord(row.caId);
+    row.ca = ca;
+    return row;
+  }
+
   private toSummary(row: IssuedCertificateEntity): CertificateSummary {
+    const caStatus = row.ca?.status ?? 'active';
+    const status = computeCertificateStatus({
+      caStatus,
+      notBefore: row.notBefore,
+      notAfter: row.notAfter,
+    });
     return {
       id: row.id,
       name: row.name,
@@ -336,7 +395,24 @@ export class CertsService {
       keyFileName: row.keyFileName,
       publicKeyBits: row.publicKeyBits,
       createdAt: row.createdAt.toISOString(),
-      filesPresent: existsSync(this.getCertPath(row.name)) && existsSync(this.getKeyPath(row.name)),
+      ca: {
+        id: row.ca?.id ?? row.caId,
+        name: row.ca?.name ?? '',
+        commonName: row.ca?.commonName ?? '',
+        status: caStatus,
+        publicFileName: row.ca?.publicFileName ?? '',
+      },
+      status,
+      statusLabel: certificateStatusLabel(status),
+      archive: {
+        storageKind: 'archive',
+        storageLabel: '证书库',
+        uploaded: Boolean(row.archiveUploadedAt && row.archiveCertObjectKey && row.archiveKeyObjectKey),
+        objectPrefix: row.archiveObjectPrefix,
+        certObjectKey: row.archiveCertObjectKey,
+        keyObjectKey: row.archiveKeyObjectKey,
+        uploadedAt: row.archiveUploadedAt ? row.archiveUploadedAt.toISOString() : null,
+      },
     };
   }
 
@@ -359,37 +435,5 @@ export class CertsService {
     }
     const stem = sanitizePublicBasename(row.publicFileName.replace(/\.(crt|cer|pem)$/i, '')) || row.name;
     return `${stem}-nginx.zip`;
-  }
-
-  private async writeCertFiles(name: string, certPem: string, keyPem: string): Promise<void> {
-    const dir = this.getCertDir(name);
-    await mkdir(dir, { recursive: true });
-    const certPath = this.getCertPath(name);
-    const keyPath = this.getKeyPath(name);
-    try {
-      await writeFile(certPath, certPem, { encoding: 'utf8', mode: 0o644 });
-      await writeFile(keyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
-      try {
-        await chmod(keyPath, 0o600);
-      } catch {
-        // Windows may ignore chmod
-      }
-    } catch (error) {
-      throw new InternalServerErrorException(
-        `写入服务器证书文件失败：${error instanceof Error ? error.message : '未知错误'}`,
-      );
-    }
-  }
-
-  private async assertFilesPresent(name: string): Promise<void> {
-    if (!existsSync(this.getCertPath(name)) || !existsSync(this.getKeyPath(name))) {
-      throw new NotFoundException(
-        `证书「${name}」的本地文件缺失（需要 server.crt 与 server.key）。请重新签发。`,
-      );
-    }
-  }
-
-  async removeLocalDir(name: string): Promise<void> {
-    await rm(this.getCertDir(name), { recursive: true, force: true });
   }
 }

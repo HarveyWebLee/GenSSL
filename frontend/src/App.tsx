@@ -8,6 +8,7 @@ import { ServersPage } from './pages/ServersPage';
 import { DeployPage } from './pages/DeployPage';
 import { NginxPage } from './pages/NginxPage';
 import { GuidePage } from './pages/GuidePage';
+import { ArchivePage } from './pages/ArchivePage';
 
 export default function App() {
   return (
@@ -18,6 +19,7 @@ export default function App() {
           <Route path="/ca" element={<RootCaPage />} />
           <Route path="/issue" element={<IssueCertPage />} />
           <Route path="/certs" element={<CertsPage />} />
+          <Route path="/archive" element={<ArchivePage />} />
           <Route path="/servers" element={<ServersPage />} />
           <Route path="/deploy" element={<DeployPage />} />
           <Route path="/nginx" element={<NginxPage />} />

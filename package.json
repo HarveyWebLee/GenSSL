@@ -18,7 +18,8 @@
     "test": "npm run test -w backend",
     "infra:up": "docker compose up -d",
     "infra:down": "docker compose down",
-    "infra:ps": "docker compose ps"
+    "infra:ps": "docker compose ps",
+    "reset": "node ./scripts/reset-local.cjs"
   },
   "devDependencies": {
     "concurrently": "10.0.7"

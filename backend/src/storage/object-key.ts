@@ -1,5 +1,14 @@
 import { BadRequestException } from '@nestjs/common';
-import { assertSafeObjectKey, assertSafeUploadFileName } from './upload-guard';
+import path from 'node:path';
+import { assertSafeObjectKey, assertSafeUploadFileName, isForbiddenUploadName } from './upload-guard';
+
+export const ARCHIVE_ROOT = 'archive';
+export const DEPLOY_ROOT = 'deploy';
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export type StorageKind = 'archive' | 'deploy';
 
 export function sanitizeKeySegment(raw: string): string {
   const value = raw
@@ -26,7 +35,6 @@ export function normalizeDeployPath(raw: string): string {
     if (part === '..') {
       throw new BadRequestException('部署路径不能包含「..」。');
     }
-    // Keep drive letter like "E:" by stripping colon already handled; "E" remains
     const segment = part.endsWith(':') ? part.slice(0, -1) : part;
     if (segment) {
       cleaned.push(segment);
@@ -38,17 +46,92 @@ export function normalizeDeployPath(raw: string): string {
   return cleaned.join('/');
 }
 
-export function buildObjectPrefix(serverName: string, deployPath: string): string {
+export function assertUuidSegment(value: string, label: string): string {
+  const trimmed = value.trim();
+  if (!UUID_RE.test(trimmed)) {
+    throw new BadRequestException(`${label} 无效。`);
+  }
+  return trimmed.toLowerCase();
+}
+
+function fileBaseName(fileName: string): string {
+  const safeName = assertSafeUploadFileName(fileName);
+  const base = safeName.split(/[\\/]/).pop() ?? safeName;
+  if (!base || isForbiddenUploadName(base)) {
+    throw new BadRequestException(
+      '禁止上传 rootCA.key。根 CA 私钥只保存在数据库中，不得出现在文件服务器里。',
+    );
+  }
+  return base;
+}
+
+/** 证书管理库：根证书公钥。永远不会是 rootCA.key。 */
+export function buildArchiveCaObjectKey(caId: string, fileName = 'rootCA.crt'): string {
+  const id = assertUuidSegment(caId, '根证书 ID');
+  return assertSafeObjectKey(`${ARCHIVE_ROOT}/cas/${id}/${fileBaseName(fileName)}`);
+}
+
+export function buildArchiveCaPrefix(caId: string): string {
+  const id = assertUuidSegment(caId, '根证书 ID');
+  return `${ARCHIVE_ROOT}/cas/${id}`;
+}
+
+/** 证书管理库：某张服务器证书的目录。 */
+export function buildArchiveCertPrefix(caId: string, certId: string): string {
+  const ca = assertUuidSegment(caId, '根证书 ID');
+  const cert = assertUuidSegment(certId, '服务器证书 ID');
+  return `${ARCHIVE_ROOT}/certs/${ca}/${cert}`;
+}
+
+export function buildArchiveCertObjectKey(caId: string, certId: string, fileName: string): string {
+  return assertSafeObjectKey(`${buildArchiveCertPrefix(caId, certId)}/${fileBaseName(fileName)}`);
+}
+
+/** 部署到某台服务器 cert 目录（或用户登记的部署路径）对应的前缀。 */
+export function buildDeployObjectPrefix(serverName: string, deployPath: string): string {
   const server = sanitizeKeySegment(serverName);
   const pathPrefix = normalizeDeployPath(deployPath)
     .split('/')
     .map((part) => sanitizeKeySegment(part))
     .join('/');
-  return `${server}/${pathPrefix}`;
+  return `${DEPLOY_ROOT}/${server}/${pathPrefix}`;
 }
 
-export function buildObjectKey(serverName: string, deployPath: string, fileName: string): string {
-  const safeName = assertSafeUploadFileName(fileName);
-  const base = safeName.split(/[\\/]/).pop() ?? safeName;
-  return assertSafeObjectKey(`${buildObjectPrefix(serverName, deployPath)}/${base}`);
+export function buildDeployObjectKey(serverName: string, deployPath: string, fileName: string): string {
+  return assertSafeObjectKey(`${buildDeployObjectPrefix(serverName, deployPath)}/${fileBaseName(fileName)}`);
+}
+
+export function classifyStorageKind(objectKey: string): StorageKind {
+  const key = assertSafeObjectKey(objectKey);
+  if (key === ARCHIVE_ROOT || key.startsWith(`${ARCHIVE_ROOT}/`)) {
+    return 'archive';
+  }
+  if (key === DEPLOY_ROOT || key.startsWith(`${DEPLOY_ROOT}/`)) {
+    return 'deploy';
+  }
+  throw new BadRequestException('对象键必须位于证书库（archive/）或服务器部署目录（deploy/）下。');
+}
+
+export function assertArchiveObjectKey(objectKey: string): string {
+  const key = assertSafeObjectKey(objectKey);
+  if (classifyStorageKind(key) !== 'archive') {
+    throw new BadRequestException('该对象不属于证书库（archive/）。');
+  }
+  return key;
+}
+
+export function assertDeployObjectKey(objectKey: string): string {
+  const key = assertSafeObjectKey(objectKey);
+  if (classifyStorageKind(key) !== 'deploy') {
+    throw new BadRequestException('该对象不属于服务器部署目录（deploy/）。');
+  }
+  return key;
+}
+
+export function storageKindLabel(kind: StorageKind): string {
+  return kind === 'archive' ? '证书库' : '服务器部署目录';
+}
+
+export function fileNameFromObjectKey(objectKey: string): string {
+  return path.posix.basename(objectKey);
 }
