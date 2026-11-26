@@ -19,6 +19,9 @@
     "infra:up": "docker compose up -d",
     "infra:down": "docker compose down",
     "infra:ps": "docker compose ps",
+    "prod:up": "docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build",
+    "prod:down": "docker compose -f docker-compose.prod.yml --env-file .env.production down",
+    "prod:ps": "docker compose -f docker-compose.prod.yml --env-file .env.production ps",
     "reset": "node ./scripts/reset-local.cjs"
   },
   "devDependencies": {

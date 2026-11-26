@@ -27,18 +27,25 @@ Nginx 需要的是服务器私钥，不要与根 CA 私钥混淆。签发和「�
 
 ```text
 GenSSL/
-├── docker-compose.yml    # PostgreSQL + RustFS
+├── docker-compose.yml           # 本地基础设施：PostgreSQL + RustFS（不启动前后端）
+├── docker-compose.prod.yml      # 生产编排：Postgres、RustFS、后端、前端
+├── .env.example                 # 本地开发环境变量示例
+├── .env.production.example      # 生产环境变量示例
+├── .dockerignore
 ├── scripts/reset-local.cjs / reset-product.sh  # 清遗留本地目录，并提示清卷命令
-├── backend/              # NestJS
-│   ├── src/ca/           # 多根 CA（私钥仅存数据库）
-│   ├── src/certs/        # 服务器证书签发 / 校验 / 下载
-│   ├── src/archive/      # 证书库（archive/）
-│   ├── src/servers/      # 目标服务器、SSH 配置与部署路径
-│   ├── src/ssh/          # SSH/SFTP 客户端、凭据加密与路径校验
-│   ├── src/storage/      # RustFS（S3 path-style）与对象键
-│   ├── src/deploy/       # 远程 SFTP 部署与管理副本记录
-│   └── src/overview/     # 概览与证书库列表
-└── frontend/             # React 19 + Ant Design 6
+├── backend/                     # NestJS
+│   ├── Dockerfile               # 生产镜像（构建上下文为仓库根目录）
+│   ├── src/ca/                  # 多根 CA（私钥仅存数据库）
+│   ├── src/certs/               # 服务器证书签发 / 校验 / 下载
+│   ├── src/archive/             # 证书库（archive/）
+│   ├── src/servers/             # 目标服务器、SSH 配置与部署路径
+│   ├── src/ssh/                 # SSH/SFTP 客户端、凭据加密与路径校验
+│   ├── src/storage/             # RustFS（S3 path-style）与对象键
+│   ├── src/deploy/              # 远程 SFTP 部署与管理副本记录
+│   └── src/overview/            # 概览与证书库列表
+└── frontend/                    # React 19 + Ant Design 6
+    ├── Dockerfile               # 生产镜像（构建上下文为仓库根目录）
+    └── nginx.conf               # 生产环境管理界面 Nginx 配置
 ```
 
 ## 环境要求
@@ -121,7 +128,7 @@ npm run dev
    默认为 RSA 2048、397 天、CA:FALSE、serverAuth。可选附加 DNS 名称。签发后会校验证书链、SAN、有效期以及与私钥是否匹配。服务器证书和服务器私钥写入证书库 `archive/certs/<caId>/<certId>/`，不会自动部署到服务器目录。
 3. **登记目标服务器与路径**（「服务器与路径」页）：例如服务器 `web-01`，填写 SSH 主机、端口（默认 22）、用户名，以及密码或私钥；部署目录为远程绝对路径，例如 `/etc/nginx/ssl`。保存后可使用「测试连接」检查登录和目录是否可访问（不会创建目录，也不会上传证书）。
 4. **上传部署**（「上传部署」页）：选择证书、目标服务器和路径，平台通过 SFTP 把服务器证书和私钥（可选再带根证书公钥）写入远程目录，文件名沿用证书自己的公钥/私钥文件名。同时在 RustFS `deploy/<serverName>/<path>/` 保留一份管理副本。这与证书库不是同一处。远程目录或管理副本已有同名文件时需确认覆盖。未配置 SSH 或连接/上传失败时，接口会明确失败，不会仅因管理副本写入成功而报成功。
-5. 在 Nginx 中配置 `ssl_certificate` / `ssl_certificate_key` 指向远程目录中的实际文件。客户端安装的必须是签发该服务器证书的那棵根的公钥。
+5. 在「Nginx 配置」页生成配置示例：`ssl_certificate` / `ssl_certificate_key` 须指向远程目录中实际上传后的文件（文件名沿用证书自己的名称，例如 `/etc/nginx/ssl/192.168.99.242.crt`），不要指向 RustFS 管理副本。`server_name` 可直接写 IP，须与证书 SAN 一致且不要带端口。非 443 端口请用 `https://IP:端口` 访问。客户端安装的必须是签发该服务器证书的那棵根的公钥。
 
 停用某棵根后：不能再用它签发；它签过的服务器证书会显示为「已失效（需重签）」。私钥和历史都会保留，直到客户端和 Nginx 都切走。
 
@@ -186,6 +193,47 @@ npm test
 ```
 
 后端构建产物在 `backend/dist`，前端在 `frontend/dist`。
+
+## 3. 生产环境 Docker 部署
+
+生产编排与本机开发是两套配置，不要把开发端口改成生产端口。
+
+| 环境 | 前端 | 后端 | PostgreSQL | RustFS S3 |
+| --- | --- | --- | --- | --- |
+| 本机开发 | http://127.0.0.1:3085 | http://127.0.0.1:18087/api | 127.0.0.1:19666 | http://127.0.0.1:19701 |
+| 生产 Docker | `http://<主机>:18347` | `http://<主机>:19347/api` | 仅容器网络 `postgres:5432` | 仅容器网络 `http://rustfs:9000` |
+
+`docker compose up -d` 和 `npm run infra:up` **只**启动本地 Postgres 与 RustFS，不会拉起前后端。生产栈请使用下面的命令。
+
+1. 复制并编辑生产环境变量（不要提交真实的 `.env.production`，也不要把它打进镜像）：
+
+```bash
+cp .env.production.example .env.production
+```
+
+必须自行更换 `POSTGRES_PASSWORD`、`RUSTFS_ACCESS_KEY`、`RUSTFS_SECRET_KEY`、`GENSSL_SSH_CREDENTIAL_KEY`。生产示例中 `GENSSL_STRICT_SECRETS=true`，未配置 SSH 加密密钥时测试连接和上传部署会失败。可用 `openssl rand -hex 32` 生成 64 位十六进制密钥。
+
+生产环境变量键名与开发一致。容器内后端连接数据库应使用 `POSTGRES_HOST=postgres`、`POSTGRES_PORT=5432`（不要用 19666）；RustFS 使用 `RUSTFS_ENDPOINT=http://rustfs:9000`（不要用 19701）。这些容器网络地址已在 `docker-compose.prod.yml` 中为后端写明，避免误用宿主机开发地址。
+
+2. 构建并启动：
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+```
+
+或：`npm run prod:up`（同样读取 `.env.production`）。查看状态：`npm run prod:ps`。停止：`npm run prod:down`（默认保留数据卷）。
+
+3. 访问：
+
+- 管理界面：`http://<主机>:18347`（Nginx 托管前端静态资源，并将 `/api` 反代到后端）
+- 后端直连：`http://<主机>:19347/api`
+- 前端 axios 的 `baseURL` 仍是相对路径 `/api`，不要改成绝对地址
+
+生产环境 Postgres 与 RustFS 默认不对宿主机暴露端口。如需查看 RustFS 控制台，可在 `docker-compose.prod.yml` 中按注释打开端口映射。
+
+后端容器需要 SSH 到局域网服务器（例如 `192.168.99.242:22`）时，使用默认 bridge 即可：只要宿主机能路由到这些地址，容器一般也能访问。
+
+前端 Nginx 配置在 `frontend/nginx.conf`，镜像内监听 18347。管理界面本次先使用 HTTP；日后可用本平台签发的证书为该站点加 TLS。这与「Nginx 配置」页生成的**业务站点**证书示例不是同一份配置。
 
 ## SSH 与主机密钥
 

@@ -253,10 +253,18 @@ export interface ServerWritePayload {
   resetSshHostKey?: boolean;
 }
 
-export interface TestConnectionPayload extends ServerWritePayload {
-  serverId?: string;
-  pathId?: string;
+export interface TestConnectionPayload {
+  host?: string;
+  sshPort?: number;
+  sshUsername?: string;
+  sshAuthMethod?: SshAuthMethod;
+  sshPassword?: string;
+  sshPrivateKey?: string;
+  sshPassphrase?: string;
+  sshTimeoutMs?: number;
   remotePath?: string;
+  pathId?: string;
+  serverId?: string;
   trustHostKey?: boolean;
 }
 

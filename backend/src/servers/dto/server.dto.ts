@@ -171,6 +171,18 @@ export class UpdateServerPathDto {
 export class TestServerConnectionDto extends SshCredentialFieldsDto {
   @Transform(emptyToUndefined)
   @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  name?: string;
+
+  @Transform(emptyToUndefined)
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  description?: string;
+
+  @Transform(emptyToUndefined)
+  @IsOptional()
   @IsUUID('4')
   serverId?: string;
 

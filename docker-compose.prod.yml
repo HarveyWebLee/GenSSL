@@ -1,0 +1,175 @@
+# GenSSL 生产编排：PostgreSQL + RustFS + 后端 + 前端
+# 启动（在项目根目录）：
+#   cp .env.production.example .env.production   # 然后更换密码和密钥
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+#
+# 发布端口：
+#   前端管理界面  18347 -> 容器内 Nginx 18347
+#   后端 API      19347 -> 容器内 NestJS 19347
+# Postgres、RustFS 默认不对宿主机暴露。
+#
+# 本文件与本地 docker-compose.yml 相互独立：
+#   docker compose up -d / npm run infra:up 仍然只启动开发用基础设施。
+
+name: genssl-prod
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: genssl-prod-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-genssl}
+      POSTGRES_USER: ${POSTGRES_USER:-genssl}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env.production 中设置 POSTGRES_PASSWORD}
+    volumes:
+      - genssl_prod_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - genssl-prod-network
+    restart: unless-stopped
+
+  rustfs-volume-permission-helper:
+    image: alpine:3.20
+    container_name: genssl-prod-rustfs-perms
+    volumes:
+      - genssl_prod_rustfs_data_0:/data/rustfs0
+      - genssl_prod_rustfs_data_1:/data/rustfs1
+      - genssl_prod_rustfs_data_2:/data/rustfs2
+      - genssl_prod_rustfs_data_3:/data/rustfs3
+      - genssl_prod_rustfs_logs:/app/logs
+    command: >
+      sh -c "
+        chown -R 10001:10001 /data/rustfs0 /data/rustfs1 /data/rustfs2 /data/rustfs3 /app/logs &&
+        echo 'Volume permissions fixed (10001:10001)' &&
+        exit 0
+      "
+    restart: "no"
+    networks:
+      - genssl-prod-network
+
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: genssl-prod-rustfs
+    depends_on:
+      rustfs-volume-permission-helper:
+        condition: service_completed_successfully
+    security_opt:
+      - "no-new-privileges:true"
+    # 默认不对宿主机暴露。如需从宿主机查看控制台或调试 S3 API，可取消下面注释。
+    # 若本机同时运行开发栈（19701/19702），请换成空闲的宿主机端口。
+    # ports:
+    #   - "19701:9000"
+    #   - "19702:9001"
+    environment:
+      RUSTFS_VOLUMES: /data/rustfs{0...3}
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CONSOLE_CORS_ALLOWED_ORIGINS: "*"
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:?请在 .env.production 中设置 RUSTFS_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?请在 .env.production 中设置 RUSTFS_SECRET_KEY}
+      RUSTFS_OBS_LOGGER_LEVEL: info
+      RUSTFS_OBS_LOG_DIRECTORY: /app/logs
+      # 单机部署可用。不要把本服务暴露到公网。
+      RUSTFS_UNSAFE_BYPASS_DISK_CHECK: ${RUSTFS_UNSAFE_BYPASS_DISK_CHECK:-true}
+    volumes:
+      - genssl_prod_rustfs_data_0:/data/rustfs0
+      - genssl_prod_rustfs_data_1:/data/rustfs1
+      - genssl_prod_rustfs_data_2:/data/rustfs2
+      - genssl_prod_rustfs_data_3:/data/rustfs3
+      - genssl_prod_rustfs_logs:/app/logs
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "sh",
+          "-ec",
+          "curl -fsS http://127.0.0.1:9000/health && curl -fsS http://127.0.0.1:9001/rustfs/console/health",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - genssl-prod-network
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: genssl-prod-backend
+    init: true
+    ports:
+      - "19347:19347"
+    environment:
+      NODE_ENV: production
+      # 容器内固定端口，须与前端 Nginx 反代及端口映射一致
+      PORT: "19347"
+      # 必须监听 0.0.0.0，否则容器外（含前端 Nginx）连不上
+      HOST: "0.0.0.0"
+      # 容器网络内的地址，不要使用开发环境的 127.0.0.1:19666 / 19701
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-genssl}
+      POSTGRES_USER: ${POSTGRES_USER:-genssl}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env.production 中设置 POSTGRES_PASSWORD}
+      RUSTFS_ENDPOINT: http://rustfs:9000
+      RUSTFS_REGION: ${RUSTFS_REGION:-us-east-1}
+      RUSTFS_BUCKET: ${RUSTFS_BUCKET:-genssl}
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:?请在 .env.production 中设置 RUSTFS_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?请在 .env.production 中设置 RUSTFS_SECRET_KEY}
+      TYPEORM_SYNC: ${TYPEORM_SYNC:-true}
+      GENSSL_SSH_CREDENTIAL_KEY: ${GENSSL_SSH_CREDENTIAL_KEY:?请在 .env.production 中设置 GENSSL_SSH_CREDENTIAL_KEY}
+      GENSSL_STRICT_SECRETS: ${GENSSL_STRICT_SECRETS:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rustfs:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:19347/api/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+    networks:
+      - genssl-prod-network
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: genssl-prod-frontend
+    ports:
+      - "18347:18347"
+    depends_on:
+      backend:
+        condition: service_started
+    networks:
+      - genssl-prod-network
+    restart: unless-stopped
+
+networks:
+  genssl-prod-network:
+    name: genssl-prod-network
+
+volumes:
+  genssl_prod_pg_data:
+  genssl_prod_rustfs_data_0:
+  genssl_prod_rustfs_data_1:
+  genssl_prod_rustfs_data_2:
+  genssl_prod_rustfs_data_3:
+  genssl_prod_rustfs_logs:

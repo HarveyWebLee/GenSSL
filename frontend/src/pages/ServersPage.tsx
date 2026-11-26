@@ -30,7 +30,7 @@ import {
   updateServer,
   updateServerPath,
 } from '../api/ssl';
-import type { ServerPath, ServerRecord, ServerWritePayload, SshAuthMethod } from '../api/types';
+import type { ServerPath, ServerRecord, ServerWritePayload, SshAuthMethod, TestConnectionPayload } from '../api/types';
 import { FieldHint } from '../components/FieldHint';
 import { NextStepCard } from '../components/NextStepCard';
 import { PageHeader } from '../components/PageHeader';
@@ -81,6 +81,36 @@ function buildServerPayload(values: ServerForm): ServerWritePayload & { name: st
   }
   if (values.resetSshHostKey) {
     payload.resetSshHostKey = true;
+  }
+  return payload;
+}
+
+function buildTestConnectionPayload(
+  values: ServerForm,
+  extras?: { trustHostKey?: boolean },
+): TestConnectionPayload {
+  const payload: TestConnectionPayload = {
+    host: values.host,
+    sshPort: values.sshPort,
+    sshUsername: values.sshUsername,
+    sshAuthMethod: values.sshAuthMethod,
+    sshTimeoutMs: values.sshTimeoutMs,
+  };
+  if (values.sshPassword?.trim()) {
+    payload.sshPassword = values.sshPassword;
+  }
+  if (values.sshPrivateKey?.trim()) {
+    payload.sshPrivateKey = values.sshPrivateKey;
+  }
+  if (values.sshPassphrase?.trim()) {
+    payload.sshPassphrase = values.sshPassphrase;
+  }
+  const remotePath = values.testRemotePath?.trim();
+  if (remotePath) {
+    payload.remotePath = remotePath;
+  }
+  if (extras?.trustHostKey) {
+    payload.trustHostKey = true;
   }
   return payload;
 }
@@ -136,11 +166,7 @@ export function ServersPage() {
     mutationFn: async () => {
       const values = await serverForm.validateFields(['name', 'host', 'sshUsername', 'sshAuthMethod']);
       const all = serverForm.getFieldsValue();
-      const payload = {
-        ...buildServerPayload({ ...values, ...all }),
-        remotePath: all.testRemotePath?.trim() || undefined,
-      };
-      return testServerConnection(payload, editing?.id);
+      return testServerConnection(buildTestConnectionPayload({ ...values, ...all }), editing?.id);
     },
     onSuccess: (result) => {
       message.success(result.message);
@@ -155,12 +181,10 @@ export function ServersPage() {
           cancelText: '取消',
           onOk: async () => {
             const values = serverForm.getFieldsValue();
-            const payload = {
-              ...buildServerPayload(values),
-              remotePath: values.testRemotePath?.trim() || undefined,
-              trustHostKey: true,
-            };
-            const result = await testServerConnection(payload, editing?.id);
+            const result = await testServerConnection(
+              buildTestConnectionPayload(values, { trustHostKey: true }),
+              editing?.id,
+            );
             message.success(result.message);
             await invalidate();
           },
