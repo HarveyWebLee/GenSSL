@@ -14,9 +14,9 @@ import { readSanFromCert } from './san';
 async function setup() {
   const cas = createMemoryRepository<RootCaEntity>();
   const certs = createMemoryRepository<IssuedCertificateEntity>();
-  const caService = new CaService(cas as never, certs as never);
   const rustfs = new MemoryRustfsService();
   const archive = new ArchiveService(rustfs as never);
+  const caService = new CaService(cas as never, certs as never, archive);
   const certsService = new CertsService(caService, archive, certs as never);
   const root = await caService.create({ name: 'Lan-Root-CA', keySize: 2048, organization: 'Lan' });
   return { cas, certs, caService, rustfs, archive, certsService, root };
@@ -105,5 +105,93 @@ describe('CertsService (multi-root, archive on RustFS)', () => {
       (error: unknown) => error instanceof ServiceUnavailableException,
     );
     assert.equal(rustfs.objects.size, 0);
+  });
+
+  it('marks issued certificates unavailable after the root is regenerated, then restores them when they are regenerated', async () => {
+    const { certsService, caService, rustfs, root } = await setup();
+    const issued = await certsService.issue({
+      caId: root.id,
+      ips: ['192.168.99.242', '192.168.99.243'],
+      keySize: 2048,
+      days: 30,
+    });
+    const previousSerial = issued.serialNumber;
+    const previousFingerprint = issued.fingerprintSha256;
+    const previousCertPem = rustfs.objects.get(issued.archive.certObjectKey as string)?.toString('utf8');
+    const previousKeyPem = rustfs.objects.get(issued.archive.keyObjectKey as string)?.toString('utf8');
+    const rootObjectKey = `archive/cas/${root.id}/rootCA.crt`;
+    const previousRootPem = rustfs.objects.get(rootObjectKey)?.toString('utf8');
+    assert.ok(previousCertPem);
+    assert.ok(previousKeyPem);
+
+    const overwrittenRoot = await caService.regenerate(root.id, { days: 60, keySize: 2048 });
+    assert.equal(overwrittenRoot.id, root.id);
+    assert.equal(overwrittenRoot.status, 'active');
+    assert.equal(overwrittenRoot.generation, 2);
+    assert.equal(overwrittenRoot.needsRegenerateCount, 1);
+    assert.notEqual(rustfs.objects.get(rootObjectKey)?.toString('utf8'), previousRootPem);
+    assert.ok(rustfs.objects.get(rootObjectKey)?.toString('utf8')?.includes('BEGIN CERTIFICATE'));
+    assert.equal([...rustfs.objects.keys()].some((key) => /rootca\.key$/i.test(key)), false);
+    assert.equal([...rustfs.objects.keys()].some((key) => key.startsWith('deploy/')), false);
+
+    const stale = (await certsService.list()).items[0]!;
+    assert.equal(stale.id, issued.id);
+    assert.equal(stale.status, 'needs_regenerate');
+    assert.equal(stale.statusLabel, '不可用，需重新生成并覆盖');
+    assert.equal(stale.unavailableReason, 'ca_regenerated');
+    assert.equal(stale.ca.status, 'active');
+    assert.equal(stale.caGeneration, 1);
+
+    const restored = await certsService.regenerate(issued.id);
+    assert.equal(restored.id, issued.id);
+    assert.equal(restored.name, issued.name);
+    assert.equal(restored.ca.id, root.id);
+    assert.equal(restored.status, 'valid');
+    assert.equal(restored.unavailableReason, null);
+    assert.equal(restored.caGeneration, 2);
+    assert.notEqual(restored.serialNumber, previousSerial);
+    assert.notEqual(restored.fingerprintSha256, previousFingerprint);
+    assert.deepEqual(restored.ips, ['192.168.99.242', '192.168.99.243']);
+    assert.equal(restored.verification.ok, true);
+    assert.match(restored.warning ?? '', /部署目录/);
+    assert.equal(restored.archive.certObjectKey, issued.archive.certObjectKey);
+    assert.notEqual(rustfs.objects.get(issued.archive.certObjectKey as string)?.toString('utf8'), previousCertPem);
+    assert.notEqual(rustfs.objects.get(issued.archive.keyObjectKey as string)?.toString('utf8'), previousKeyPem);
+    assert.equal([...rustfs.objects.keys()].some((key) => key.startsWith('deploy/')), false);
+    assert.equal([...rustfs.objects.keys()].some((key) => /rootca\.key$/i.test(key)), false);
+  });
+
+  it('allows rotating a still-valid server certificate, and refuses regenerate under a retired root', async () => {
+    const { certsService, caService, root } = await setup();
+    const issued = await certsService.issue({
+      caId: root.id,
+      ips: ['10.0.0.8'],
+      keySize: 2048,
+    });
+    const rotated = await certsService.regenerate(issued.id, { days: 20 });
+    assert.equal(rotated.id, issued.id);
+    assert.equal(rotated.status, 'valid');
+    assert.notEqual(rotated.serialNumber, issued.serialNumber);
+    assert.equal(rotated.days, 20);
+
+    await caService.retire(root.id);
+    await assert.rejects(
+      () => certsService.regenerate(issued.id),
+      (error: unknown) => error instanceof BadRequestException,
+    );
+  });
+
+  it('batch-regenerates unavailable certificates under a regenerated root', async () => {
+    const { certsService, caService, root } = await setup();
+    const first = await certsService.issue({ caId: root.id, ips: ['10.0.0.2'], keySize: 2048 });
+    const second = await certsService.issue({ caId: root.id, ips: ['10.0.0.3'], keySize: 2048 });
+    await caService.regenerate(root.id, { keySize: 2048 });
+
+    const result = await certsService.regenerateMany({ caId: root.id });
+    assert.equal(result.failed.length, 0);
+    assert.equal(result.items.length, 2);
+    assert.deepEqual(result.items.map((item) => item.id).sort(), [first.id, second.id].sort());
+    assert.ok(result.items.every((item) => item.status === 'valid'));
+    assert.ok(result.items.every((item) => item.caGeneration === 2));
   });
 });

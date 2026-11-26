@@ -2,6 +2,7 @@ import { Body, Controller, Delete, Get, Param, Patch, Post } from '@nestjs/commo
 import {
   CreateServerDto,
   CreateServerPathDto,
+  TestServerConnectionDto,
   UpdateServerDto,
   UpdateServerPathDto,
 } from './dto/server.dto';
@@ -21,6 +22,11 @@ export class ServersController {
     return this.serversService.create(dto);
   }
 
+  @Post('test-connection')
+  testConnection(@Body() dto: TestServerConnectionDto) {
+    return this.serversService.testConnection(dto);
+  }
+
   @Get(':id')
   get(@Param('id') id: string) {
     return this.serversService.get(id);
@@ -34,6 +40,11 @@ export class ServersController {
   @Delete(':id')
   remove(@Param('id') id: string) {
     return this.serversService.remove(id);
+  }
+
+  @Post(':id/test-connection')
+  testServerConnection(@Param('id') id: string, @Body() dto: TestServerConnectionDto) {
+    return this.serversService.testConnection(dto, id);
   }
 
   @Post(':id/paths')

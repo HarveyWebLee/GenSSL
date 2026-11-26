@@ -194,4 +194,80 @@ describe('CaService (multi-root, database only)', () => {
       (error: unknown) => error instanceof BadRequestException,
     );
   });
+
+  it('regenerates and overwrites the same root, keeps it active, and marks prior child certs as needing regenerate', async () => {
+    const { service, cas, certs } = createService();
+    const created = await service.create({
+      name: 'Rotate-In-Place',
+      keySize: 2048,
+      organization: 'Lan',
+      days: 30,
+    });
+    const previousSerial = created.serialNumber;
+    const previousFingerprint = created.fingerprintSha256;
+    const previousPem = cas.items[0]!.certificatePem;
+    const previousKey = cas.items[0]!.privateKeyPem;
+
+    certs.items.push({
+      id: '33333333-3333-4333-8333-333333333333',
+      caId: created.id,
+      name: 'app',
+      commonName: '192.168.99.242',
+      ips: ['192.168.99.242'],
+      dnsNames: [],
+      days: 397,
+      notBefore: new Date('2026-01-01T00:00:00.000Z'),
+      notAfter: new Date('2027-01-01T00:00:00.000Z'),
+      serialNumber: 'bb',
+      fingerprintSha256: 'EE',
+      signatureAlgorithm: 'sha256WithRSAEncryption',
+      publicKeyBits: 2048,
+      subject: {},
+      publicFileName: 'app.crt',
+      keyFileName: 'app.key',
+      sanDisplay: 'Subject Alternative Name:\n    IP Address: 192.168.99.242',
+      caGeneration: 1,
+      issuerFingerprintSha256: previousFingerprint,
+      certificatePem: '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n',
+      archiveObjectPrefix: `archive/certs/${created.id}/33333333-3333-4333-8333-333333333333/`,
+      archiveCertObjectKey: `archive/certs/${created.id}/33333333-3333-4333-8333-333333333333/app.crt`,
+      archiveKeyObjectKey: `archive/certs/${created.id}/33333333-3333-4333-8333-333333333333/app.key`,
+      archiveUploadedAt: new Date(),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as unknown as IssuedCertificateEntity);
+
+    const overwritten = await service.regenerate(created.id, { days: 40, keySize: 2048 });
+    assert.equal(overwritten.id, created.id);
+    assert.equal(overwritten.name, 'Rotate-In-Place');
+    assert.equal(overwritten.status, 'active');
+    assert.equal(overwritten.retiredAt, null);
+    assert.equal(overwritten.generation, 2);
+    assert.ok(overwritten.regeneratedAt);
+    assert.notEqual(overwritten.serialNumber, previousSerial);
+    assert.notEqual(overwritten.fingerprintSha256, previousFingerprint);
+    assert.equal(overwritten.needsRegenerateCount, 1);
+    assert.equal(overwritten.needsReissueCount, 0);
+    assert.equal(overwritten.validCertificateCount, 0);
+    assert.equal(overwritten.subject.organization, 'Lan');
+
+    assert.equal(cas.items.length, 1);
+    assert.notEqual(cas.items[0]!.certificatePem, previousPem);
+    assert.notEqual(cas.items[0]!.privateKeyPem, previousKey);
+    assert.ok(cas.items[0]!.privateKeyPem.includes('PRIVATE KEY'));
+    assert.equal(cas.items[0]!.certificatePem.includes('PRIVATE KEY'), false);
+    assert.equal(JSON.stringify(overwritten).includes('PRIVATE KEY'), false);
+    assert.equal(certs.items.length, 1);
+
+  });
+
+  it('refuses to regenerate a retired root', async () => {
+    const { service } = createService();
+    const created = await service.create({ name: 'Retired-CA', keySize: 2048 });
+    await service.retire(created.id);
+    await assert.rejects(
+      () => service.regenerate(created.id),
+      (error: unknown) => error instanceof BadRequestException,
+    );
+  });
 });

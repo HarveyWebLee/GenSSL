@@ -66,6 +66,14 @@ export class IssuedCertificateEntity {
   @Column({ type: 'text' })
   sanDisplay!: string;
 
+  /** 签发时所属根的 generation；根被覆盖后会小于当前根的 generation。 */
+  @Column({ type: 'int', default: 1 })
+  caGeneration!: number;
+
+  /** 签发时根证书的 SHA-256 指纹，用于判断是否仍由当前根私钥签发。 */
+  @Column({ length: 128, default: '' })
+  issuerFingerprintSha256!: string;
+
   /** 服务器证书公钥 PEM，作为元数据保存在数据库；私钥只在证书库中。 */
   @Column({ type: 'text' })
   certificatePem!: string;

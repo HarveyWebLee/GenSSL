@@ -16,15 +16,15 @@ const COPY: Partial<Record<WorkflowStepKey, { title: string; description: string
   },
   issue: {
     title: '下一步：登记服务器和目录',
-    description: '记下证书要放到哪台机器、哪个目录，上传时会按这个名称组织文件。',
+    description: '记下要登录的机器、SSH 方式和证书目录，上传时会通过 SFTP 写入该目录。',
   },
   servers: {
     title: '下一步：上传到对应路径',
-    description: '把要用的文件上传到「服务器部署目录」（与证书库分开），再自行拷到 Nginx。',
+    description: '把证书和私钥通过 SFTP 写入远程证书目录。文件服务器中会保留一份管理副本。',
   },
   deploy: {
     title: '下一步：安装到 Nginx 并让客户端信任',
-    description: '把文件放到服务器的 cert 目录，并在客户端安装签发该证书的那棵根的公钥。',
+    description: '确认远程目录中的证书已就位，配置 Nginx，并在客户端安装签发该证书的那棵根的公钥。',
   },
 };
 

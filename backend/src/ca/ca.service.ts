@@ -4,6 +4,7 @@ import {
   Injectable,
   InternalServerErrorException,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
@@ -18,8 +19,14 @@ import {
   resolveDownloadFileName,
 } from './ca-filename';
 import type { CaHashAlgorithm, CreateCaDto } from './dto/create-ca.dto';
+import type { RegenerateCaDto } from './dto/regenerate-ca.dto';
 import { IssuedCertificateEntity } from '../certs/issued-certificate.entity';
-import { computeCertificateStatus } from '../certs/cert-status';
+import {
+  computeCertificateStatus,
+  hashAlgorithmFromSignature,
+  validityDays,
+} from '../certs/cert-status';
+import { ArchiveService } from '../archive/archive.service';
 import { RootCaEntity } from './root-ca.entity';
 import type { CaSigningMaterial, CaSubjectInfo, RootCaSummary } from './ca.types';
 
@@ -79,6 +86,7 @@ export class CaService {
     private readonly repo: Repository<RootCaEntity>,
     @InjectRepository(IssuedCertificateEntity)
     private readonly certRepo: Repository<IssuedCertificateEntity>,
+    @Optional() private readonly archiveService?: ArchiveService,
   ) {}
 
   async list(): Promise<{ items: RootCaSummary[]; activeCount: number; retiredCount: number }> {
@@ -105,7 +113,9 @@ export class CaService {
     }
     const existing = await this.repo.findOne({ where: { name } });
     if (existing) {
-      throw new ConflictException(`根证书「${name}」已存在。如需轮换，请另建一棵新的根证书，不要覆盖旧根。`);
+      throw new ConflictException(
+        `根证书「${name}」已存在。如需轮换，请另建一棵新的根证书；若要覆盖这一棵，请使用「重新生成并覆盖」。`,
+      );
     }
 
     const country = (dto.country ?? CA_DEFAULTS.country).toUpperCase();
@@ -183,6 +193,8 @@ export class CaService {
       publicFileName,
       status: 'active',
       retiredAt: null,
+      generation: 1,
+      regeneratedAt: null,
       privateKeyPem: forge.pki.privateKeyToPem(keys.privateKey),
       certificatePem: forge.pki.certificateToPem(cert),
       archiveObjectKey: null,
@@ -190,6 +202,101 @@ export class CaService {
     });
     await this.repo.save(row);
     return this.toSummary(row, []);
+  }
+
+  async regenerate(id: string, dto: RegenerateCaDto = {}): Promise<RootCaSummary> {
+    const row = await this.findRecord(id, { withPrivateKey: true });
+    if (row.status === 'retired') {
+      throw new BadRequestException(
+        `根证书「${row.name}」已停用，不能重新生成并覆盖。停用与覆盖是不同操作；如需新的信任源头，请另建一棵根证书。`,
+      );
+    }
+    if (row.archiveObjectKey) {
+      this.archiveService?.assertReady();
+    }
+
+    const subject: CaSubjectInfo = {
+      country: row.subject.country,
+      stateOrProvince: row.subject.stateOrProvince,
+      locality: row.subject.locality,
+      organization: row.subject.organization,
+      organizationalUnit: row.subject.organizationalUnit,
+      commonName: row.subject.commonName || row.commonName,
+      emailAddress: row.subject.emailAddress,
+    };
+    const attrs = this.buildSubjectAttrs(subject);
+    const keySize = dto.keySize ?? this.resolveKeySize(row.publicKeyBits);
+    const days = dto.days ?? validityDays(row.notBefore, row.notAfter);
+    const hashAlgorithm = dto.hashAlgorithm ?? hashAlgorithmFromSignature(row.signatureAlgorithm);
+    const notBefore = dto.notBefore ? new Date(dto.notBefore) : new Date();
+    if (Number.isNaN(notBefore.getTime())) {
+      throw new BadRequestException('生效时间格式无效。');
+    }
+    const notAfter = new Date(notBefore.getTime() + days * 24 * 60 * 60 * 1000);
+    const pathLenConstraint = dto.pathLenConstraint ?? row.pathLenConstraint ?? undefined;
+
+    const keys = await this.generateKeyPair(keySize);
+    const cert = forge.pki.createCertificate();
+    cert.publicKey = keys.publicKey;
+    cert.serialNumber = await this.generateUniqueSerialNumber();
+    cert.validity.notBefore = notBefore;
+    cert.validity.notAfter = notAfter;
+    cert.setSubject(attrs);
+    cert.setIssuer(attrs);
+
+    const basicConstraints: Record<string, unknown> = {
+      name: 'basicConstraints',
+      critical: true,
+      cA: true,
+    };
+    if (pathLenConstraint !== undefined && pathLenConstraint !== null) {
+      basicConstraints.pathLenConstraint = pathLenConstraint;
+    }
+    cert.setExtensions([
+      basicConstraints,
+      {
+        name: 'keyUsage',
+        critical: true,
+        keyCertSign: true,
+        cRLSign: true,
+      },
+      { name: 'subjectKeyIdentifier' },
+    ]);
+    cert.sign(keys.privateKey, this.createMessageDigest(hashAlgorithm));
+
+    const details = this.inspectCertificate(cert, row.publicFileName);
+    const certificatePem = forge.pki.certificateToPem(cert);
+    const privateKeyPem = forge.pki.privateKeyToPem(keys.privateKey);
+    if (certificatePem.includes('PRIVATE KEY')) {
+      throw new InternalServerErrorException('根证书公钥生成异常，已拒绝写入。');
+    }
+
+    if (this.archiveService?.getStatus().ready) {
+      const stored = await this.archiveService.archiveRootCertificate(row.id, certificatePem, true);
+      row.archiveObjectKey = stored.objectKey;
+      row.archiveUploadedAt = new Date();
+    }
+
+    row.commonName = subject.commonName || row.commonName;
+    row.subject = details.subject as Record<string, string>;
+    row.issuer = details.issuer as Record<string, string>;
+    row.notBefore = cert.validity.notBefore;
+    row.notAfter = cert.validity.notAfter;
+    row.serialNumber = details.serialNumber;
+    row.fingerprintSha256 = details.fingerprintSha256;
+    row.signatureAlgorithm = details.signatureAlgorithm;
+    row.publicKeyAlgorithm = 'RSA';
+    row.publicKeyBits = details.publicKeyBits;
+    row.keyUsage = details.keyUsage;
+    row.pathLenConstraint = details.pathLenConstraint;
+    row.status = 'active';
+    row.retiredAt = null;
+    row.generation = (row.generation ?? 1) + 1;
+    row.regeneratedAt = new Date();
+    row.privateKeyPem = privateKeyPem;
+    row.certificatePem = certificatePem;
+    await this.repo.save(row);
+    return this.get(id);
   }
 
   async retire(id: string): Promise<RootCaSummary> {
@@ -207,7 +314,7 @@ export class CaService {
     const row = await this.findRecord(caId, { withPrivateKey: true });
     if (row.status === 'retired') {
       throw new BadRequestException(
-        `根证书「${row.name}」已停用，不能再签发新的服务器证书。请改用一棵启用中的根证书。`,
+        `根证书「${row.name}」已停用，不能再签发或重新生成服务器证书。请改用一棵启用中的根证书。`,
       );
     }
     if (!row.privateKeyPem || !row.certificatePem) {
@@ -221,6 +328,8 @@ export class CaService {
         keyPem: row.privateKeyPem,
         publicFileName: row.publicFileName,
         status: row.status,
+        generation: row.generation ?? 1,
+        fingerprintSha256: row.fingerprintSha256,
         cert: forge.pki.certificateFromPem(row.certificatePem),
         key: forge.pki.privateKeyFromPem(row.privateKeyPem) as forge.pki.rsa.PrivateKey,
       };
@@ -309,6 +418,10 @@ export class CaService {
     const statuses = certs.map((cert) =>
       computeCertificateStatus({
         caStatus: row.status,
+        caGeneration: row.generation,
+        certCaGeneration: cert.caGeneration,
+        issuerFingerprintSha256: cert.issuerFingerprintSha256,
+        caFingerprintSha256: row.fingerprintSha256,
         notBefore: cert.notBefore,
         notAfter: cert.notAfter,
       }),
@@ -333,9 +446,12 @@ export class CaService {
       suggestedFileName: buildDefaultPublicFileName(row.subject),
       status: row.status,
       retiredAt: row.retiredAt ? row.retiredAt.toISOString() : null,
+      generation: row.generation ?? 1,
+      regeneratedAt: row.regeneratedAt ? row.regeneratedAt.toISOString() : null,
       certificateCount: certs.length,
       validCertificateCount: statuses.filter((status) => status === 'valid').length,
       needsReissueCount: statuses.filter((status) => status === 'needs_reissue').length,
+      needsRegenerateCount: statuses.filter((status) => status === 'needs_regenerate').length,
       archive: {
         storageKind: 'archive',
         storageLabel: '证书库',
@@ -408,6 +524,13 @@ export class CaService {
       buf[buf.length - 1] = 1;
     }
     return buf.toString('hex');
+  }
+
+  private resolveKeySize(bits: number): 2048 | 4096 | 8192 {
+    if (bits === 2048 || bits === 4096 || bits === 8192) {
+      return bits;
+    }
+    return CA_DEFAULTS.keySize;
   }
 
   private generateKeyPair(bits: 2048 | 4096 | 8192): Promise<forge.pki.rsa.KeyPair> {

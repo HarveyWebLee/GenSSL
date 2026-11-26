@@ -20,4 +20,9 @@ export class CreateDeployDto {
   @Transform(({ value }) => value === true || value === 'true')
   @IsBoolean()
   overwrite?: boolean;
+
+  @IsOptional()
+  @Transform(({ value }) => value === true || value === 'true')
+  @IsBoolean()
+  trustHostKey?: boolean;
 }

@@ -3,6 +3,7 @@ import type { Response } from 'express';
 import { CertsService } from './certs.service';
 import { DownloadCertQueryDto } from './dto/download-cert.dto';
 import { IssueCertDto } from './dto/issue-cert.dto';
+import { RegenerateCertDto, RegenerateCertsBatchDto } from './dto/regenerate-cert.dto';
 
 @Controller('certs')
 export class CertsController {
@@ -16,6 +17,16 @@ export class CertsController {
   @Post()
   issue(@Body() dto: IssueCertDto) {
     return this.certsService.issue(dto);
+  }
+
+  @Post('regenerate-batch')
+  regenerateBatch(@Body() dto: RegenerateCertsBatchDto) {
+    return this.certsService.regenerateMany(dto);
+  }
+
+  @Post(':id/regenerate')
+  regenerate(@Param('id') id: string, @Body() dto: RegenerateCertDto) {
+    return this.certsService.regenerate(id, dto);
   }
 
   @Get(':id/download')

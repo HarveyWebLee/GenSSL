@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  HttpException,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
@@ -20,6 +21,7 @@ import {
 } from '../ca/ca-filename';
 import type { RootCaLifecycleStatus } from '../ca/root-ca.entity';
 import { IssueCertDto } from './dto/issue-cert.dto';
+import { RegenerateCertDto, RegenerateCertsBatchDto } from './dto/regenerate-cert.dto';
 import { IssuedCertificateEntity } from './issued-certificate.entity';
 import {
   deriveServerKeyFileName,
@@ -30,7 +32,11 @@ import {
 import {
   computeCertificateStatus,
   certificateStatusLabel,
+  certificateUnavailableReason,
+  hashAlgorithmFromSignature,
+  validityDays,
   type CertificateLifecycleStatus,
+  type CertificateUnavailableReason,
 } from './cert-status';
 import {
   attrsToSubject,
@@ -50,6 +56,8 @@ export interface CertificateCaRef {
   commonName: string;
   status: RootCaLifecycleStatus;
   publicFileName: string;
+  generation: number;
+  fingerprintSha256: string;
 }
 
 export interface CertificateSummary {
@@ -71,6 +79,9 @@ export interface CertificateSummary {
   ca: CertificateCaRef;
   status: CertificateLifecycleStatus;
   statusLabel: string;
+  unavailableReason: CertificateUnavailableReason;
+  caGeneration: number;
+  warning?: string;
   archive: {
     storageKind: 'archive';
     storageLabel: '证书库';
@@ -213,9 +224,125 @@ export class CertsService {
       archiveCertObjectKey: archived.certObjectKey,
       archiveKeyObjectKey: archived.keyObjectKey,
       archiveUploadedAt: new Date(),
+      caGeneration: ca.generation,
+      issuerFingerprintSha256: ca.fingerprintSha256,
     });
     await this.repo.save(row);
     return this.getDetail(id);
+  }
+
+  async regenerate(id: string, dto: RegenerateCertDto = {}): Promise<CertificateDetail> {
+    this.archiveService.assertReady();
+    const existing = await this.findRecord(id);
+    const ca = await this.caService.loadSigningMaterial(existing.caId);
+    const san = normalizeSan({ ips: existing.ips, dnsNames: existing.dnsNames });
+    const days = dto.days ?? existing.days ?? validityDays(existing.notBefore, existing.notAfter);
+    const keySize = this.resolveServerKeySize(dto.keySize ?? existing.publicKeyBits);
+    const hashAlgorithm = dto.hashAlgorithm ?? hashAlgorithmFromSignature(existing.signatureAlgorithm);
+    const notBefore = dto.notBefore ? new Date(dto.notBefore) : new Date();
+    if (Number.isNaN(notBefore.getTime())) {
+      throw new BadRequestException('生效时间格式无效。');
+    }
+
+    const keys = await generateRsaKeyPair(keySize);
+    const existingSerials = new Set((await this.repo.find({ select: ['serialNumber'] })).map((row) => row.serialNumber));
+    const issued = issueServerCertificate({
+      caCert: ca.cert,
+      caKey: ca.key,
+      keys,
+      ips: san.ips,
+      dnsNames: san.dnsNames,
+      subject: existing.subject,
+      days,
+      notBefore,
+      serialNumber: generateSerialNumber(existingSerials),
+      hashAlgorithm,
+    });
+
+    const verification = verifyServerCertificate({
+      cert: issued.cert,
+      caCert: ca.cert,
+      privateKey: keys.privateKey,
+      expectedSan: san,
+    });
+    if (!verification.ok) {
+      throw new InternalServerErrorException(
+        `证书重新生成后校验未通过：${verification.messages.join('；') || '未知原因'}`,
+      );
+    }
+
+    const archived = await this.archiveService.archiveServerCertificate({
+      caId: ca.id,
+      certId: existing.id,
+      certFileName: existing.publicFileName,
+      keyFileName: existing.keyFileName,
+      certPem: issued.certPem,
+      keyPem: issued.keyPem,
+    });
+
+    let signatureAlgorithm = 'sha256WithRSAEncryption';
+    if (hashAlgorithm === 'sha384') {
+      signatureAlgorithm = 'sha384WithRSAEncryption';
+    } else if (hashAlgorithm === 'sha512') {
+      signatureAlgorithm = 'sha512WithRSAEncryption';
+    }
+
+    existing.days = days;
+    existing.notBefore = issued.notBefore;
+    existing.notAfter = issued.notAfter;
+    existing.serialNumber = String(issued.cert.serialNumber).toLowerCase();
+    existing.fingerprintSha256 = sha256Fingerprint(issued.cert);
+    existing.signatureAlgorithm = signatureAlgorithm;
+    existing.publicKeyBits = keySize;
+    existing.subject = attrsToSubject(issued.cert.subject.attributes) as Record<string, string>;
+    existing.sanDisplay = issued.sanDisplay;
+    existing.certificatePem = issued.certPem;
+    existing.caGeneration = ca.generation;
+    existing.issuerFingerprintSha256 = ca.fingerprintSha256;
+    existing.archiveObjectPrefix = archived.prefix;
+    existing.archiveCertObjectKey = archived.certObjectKey;
+    existing.archiveKeyObjectKey = archived.keyObjectKey;
+    existing.archiveUploadedAt = new Date();
+    await this.repo.save(existing);
+
+    const detail = await this.getDetail(existing.id);
+    return {
+      ...detail,
+      warning: '证书库中的证书和私钥已覆盖写入。部署目录 deploy/ 未改动，需要重新上传部署后 Nginx 才会使用新证书。',
+    };
+  }
+
+  async regenerateMany(dto: RegenerateCertsBatchDto): Promise<{
+    items: CertificateDetail[];
+    failed: Array<{ id: string; name?: string; message: string }>;
+  }> {
+    const targets = await this.resolveRegenerateTargets(dto);
+    if (targets.length === 0) {
+      throw new BadRequestException(
+        '没有可重新生成的服务器证书。请指定证书，或选择一棵根证书下因覆盖而不可用的证书。',
+      );
+    }
+
+    const options: RegenerateCertDto = {
+      days: dto.days,
+      notBefore: dto.notBefore,
+      keySize: dto.keySize,
+      hashAlgorithm: dto.hashAlgorithm,
+    };
+    const items: CertificateDetail[] = [];
+    const failed: Array<{ id: string; name?: string; message: string }> = [];
+    for (const row of targets) {
+      try {
+        items.push(await this.regenerate(row.id, options));
+      } catch (error) {
+        failed.push({
+          id: row.id,
+          name: row.name,
+          message: this.describeError(error),
+        });
+      }
+    }
+    return { items, failed };
   }
 
   async getDetail(id: string): Promise<CertificateDetail> {
@@ -376,6 +503,10 @@ export class CertsService {
     const caStatus = row.ca?.status ?? 'active';
     const status = computeCertificateStatus({
       caStatus,
+      caGeneration: row.ca?.generation,
+      certCaGeneration: row.caGeneration,
+      issuerFingerprintSha256: row.issuerFingerprintSha256,
+      caFingerprintSha256: row.ca?.fingerprintSha256,
       notBefore: row.notBefore,
       notAfter: row.notAfter,
     });
@@ -401,9 +532,13 @@ export class CertsService {
         commonName: row.ca?.commonName ?? '',
         status: caStatus,
         publicFileName: row.ca?.publicFileName ?? '',
+        generation: row.ca?.generation ?? 1,
+        fingerprintSha256: row.ca?.fingerprintSha256 ?? '',
       },
       status,
       statusLabel: certificateStatusLabel(status),
+      unavailableReason: certificateUnavailableReason(status),
+      caGeneration: row.caGeneration ?? 1,
       archive: {
         storageKind: 'archive',
         storageLabel: '证书库',
@@ -414,6 +549,69 @@ export class CertsService {
         uploadedAt: row.archiveUploadedAt ? row.archiveUploadedAt.toISOString() : null,
       },
     };
+  }
+
+  private resolveServerKeySize(bits: number): 2048 | 4096 {
+    if (bits === 2048 || bits === 4096) {
+      return bits;
+    }
+    return SERVER_CERT_DEFAULTS.keySize;
+  }
+
+  private async resolveRegenerateTargets(dto: RegenerateCertsBatchDto): Promise<IssuedCertificateEntity[]> {
+    if (dto.ids?.length) {
+      const rows: IssuedCertificateEntity[] = [];
+      for (const id of dto.ids) {
+        rows.push(await this.findRecord(id));
+      }
+      if (dto.caId && rows.some((row) => row.caId !== dto.caId)) {
+        throw new BadRequestException('所选证书不属于指定的根证书。');
+      }
+      return rows;
+    }
+    if (!dto.caId) {
+      throw new BadRequestException(
+        '请选择要重新生成的证书，或指定一棵根证书以批量覆盖其不可用的下属证书。',
+      );
+    }
+    const ca = await this.caService.findRecord(dto.caId);
+    const rows = await this.repo.find({ where: { caId: dto.caId }, relations: { ca: true }, order: { createdAt: 'DESC' } });
+    return rows
+      .map((row) => {
+        row.ca = row.ca ?? ca;
+        return row;
+      })
+      .filter((row) => {
+        const status = computeCertificateStatus({
+          caStatus: row.ca?.status ?? ca.status,
+          caGeneration: row.ca?.generation ?? ca.generation,
+          certCaGeneration: row.caGeneration,
+          issuerFingerprintSha256: row.issuerFingerprintSha256,
+          caFingerprintSha256: row.ca?.fingerprintSha256 ?? ca.fingerprintSha256,
+          notBefore: row.notBefore,
+          notAfter: row.notAfter,
+        });
+        return status === 'needs_regenerate';
+      });
+  }
+
+  private describeError(error: unknown): string {
+    if (error instanceof HttpException) {
+      const response = error.getResponse();
+      if (typeof response === 'string' && response.trim()) {
+        return response;
+      }
+      if (typeof response === 'object' && response && 'message' in response) {
+        const message = (response as { message?: string | string[] }).message;
+        if (Array.isArray(message)) {
+          return message.join('；');
+        }
+        if (typeof message === 'string' && message.trim()) {
+          return message;
+        }
+      }
+    }
+    return error instanceof Error ? error.message : '重新生成失败';
   }
 
   private resolveRecordName(requested: string | undefined, commonName: string, firstIp?: string): string {

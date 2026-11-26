@@ -12,9 +12,16 @@ import type {
   IssueCertPayload,
   NginxConfigResult,
   OverviewData,
+  RegenerateCaPayload,
+  RegenerateCertPayload,
+  RegenerateCertsBatchPayload,
+  RegenerateCertsBatchResult,
   RootCaSummary,
   ServerRecord,
+  ServerWritePayload,
   TargetFileList,
+  TestConnectionPayload,
+  TestConnectionResult,
   WindowsTrustGuide,
 } from './types';
 
@@ -45,6 +52,12 @@ export async function createCa(payload: CreateCaPayload): Promise<RootCaSummary>
 
 export async function retireCa(id: string): Promise<RootCaSummary> {
   const { data } = await http.post<RootCaSummary>(`/ca/${id}/retire`);
+  return data;
+}
+
+export async function regenerateCa(id: string, payload: RegenerateCaPayload = {}): Promise<RootCaSummary> {
+  const timeout = payload.keySize === 8192 ? 300_000 : 120_000;
+  const { data } = await http.post<RootCaSummary>(`/ca/${id}/regenerate`, payload, { timeout });
   return data;
 }
 
@@ -81,6 +94,25 @@ export async function getCertDetail(id: string): Promise<CertificateDetail> {
   return data;
 }
 
+export async function regenerateCert(id: string, payload: RegenerateCertPayload = {}): Promise<CertificateDetail> {
+  const timeout = payload.keySize === 4096 ? 180_000 : 120_000;
+  const { data } = await http.post<CertificateDetail>(
+    `/certs/${encodeURIComponent(id)}/regenerate`,
+    payload,
+    { timeout },
+  );
+  return data;
+}
+
+export async function regenerateCertsBatch(
+  payload: RegenerateCertsBatchPayload,
+): Promise<RegenerateCertsBatchResult> {
+  const { data } = await http.post<RegenerateCertsBatchResult>('/certs/regenerate-batch', payload, {
+    timeout: 600_000,
+  });
+  return data;
+}
+
 export async function downloadIssuedCert(options: {
   id: string;
   part?: 'bundle' | 'cert' | 'key';
@@ -102,20 +134,22 @@ export async function listServers(): Promise<{ items: ServerRecord[] }> {
   return data;
 }
 
-export async function createServer(payload: {
-  name: string;
-  host?: string;
-  description?: string;
-}): Promise<ServerRecord> {
+export async function createServer(payload: ServerWritePayload & { name: string }): Promise<ServerRecord> {
   const { data } = await http.post<ServerRecord>('/servers', payload);
   return data;
 }
 
-export async function updateServer(
-  id: string,
-  payload: { name?: string; host?: string; description?: string },
-): Promise<ServerRecord> {
+export async function updateServer(id: string, payload: ServerWritePayload): Promise<ServerRecord> {
   const { data } = await http.patch<ServerRecord>(`/servers/${id}`, payload);
+  return data;
+}
+
+export async function testServerConnection(
+  payload: TestConnectionPayload,
+  serverId?: string,
+): Promise<TestConnectionResult> {
+  const url = serverId ? `/servers/${serverId}/test-connection` : '/servers/test-connection';
+  const { data } = await http.post<TestConnectionResult>(url, payload, { timeout: 120_000 });
   return data;
 }
 
@@ -156,8 +190,9 @@ export async function createDeploy(payload: {
   pathId: string;
   includeRootCaCert?: boolean;
   overwrite?: boolean;
+  trustHostKey?: boolean;
 }): Promise<DeployRecord> {
-  const { data } = await http.post<DeployRecord>('/deploys', payload, { timeout: 60_000 });
+  const { data } = await http.post<DeployRecord>('/deploys', payload, { timeout: 120_000 });
   return data;
 }
 

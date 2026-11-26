@@ -3,6 +3,7 @@ import { ArchiveService } from '../archive/archive.service';
 import { CaService } from '../ca/ca.service';
 import { CertsService } from '../certs/certs.service';
 import { ServersService } from '../servers/servers.service';
+import { DeployService } from '../deploy/deploy.service';
 import { RustfsService } from '../storage/rustfs.service';
 
 @Injectable()
@@ -13,14 +14,16 @@ export class OverviewService {
     private readonly serversService: ServersService,
     private readonly rustfs: RustfsService,
     private readonly archiveService: ArchiveService,
+    private readonly deployService: DeployService,
   ) {}
 
   async getOverview() {
-    const [cas, certs, serverCount, storageCounts] = await Promise.all([
+    const [cas, certs, serverCount, storageCounts, deploys] = await Promise.all([
       this.caService.list(),
       this.certsService.list(),
       this.serversService.count(),
       this.archiveService.countByKind(),
+      this.deployService.list(),
     ]);
 
     const statuses = certs.items.map((item) => item.status);
@@ -40,13 +43,19 @@ export class OverviewService {
           certificateCount: item.certificateCount,
           validCertificateCount: item.validCertificateCount,
           needsReissueCount: item.needsReissueCount,
+          needsRegenerateCount: item.needsRegenerateCount,
+          generation: item.generation,
+          regeneratedAt: item.regeneratedAt,
           archive: item.archive,
         })),
       },
       certificateCount: certs.items.length,
       validCertificateCount: statuses.filter((status) => status === 'valid').length,
       needsReissueCount: statuses.filter((status) => status === 'needs_reissue').length,
+      needsRegenerateCount: statuses.filter((status) => status === 'needs_regenerate').length,
       expiredCertificateCount: statuses.filter((status) => status === 'expired').length,
+      staleDeployCount: deploys.items.filter((item) => item.stale).length,
+      regeneratedActiveCaCount: cas.items.filter((item) => item.status === 'active' && (item.generation ?? 1) > 1).length,
       serverCount,
       storage: {
         ...this.rustfs.getStatus(),
@@ -75,6 +84,8 @@ export class OverviewService {
         name: item.name,
         status: item.status,
         publicFileName: item.publicFileName,
+        generation: item.generation,
+        regeneratedAt: item.regeneratedAt,
         archive: item.archive,
       })),
       certificates: certs.items.map((item) => ({

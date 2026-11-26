@@ -12,6 +12,7 @@ import type { Response } from 'express';
 import { ArchiveService } from '../archive/archive.service';
 import { CaService } from './ca.service';
 import { CreateCaDto } from './dto/create-ca.dto';
+import { RegenerateCaDto } from './dto/regenerate-ca.dto';
 import { DownloadCaQueryDto } from './dto/download-ca.dto';
 import type { RootCaSummary } from './ca.types';
 
@@ -53,6 +54,15 @@ export class CaController {
   @Post(':id/archive')
   archive(@Param('id') id: string) {
     return this.tryArchive(id, true);
+  }
+
+  @Post(':id/regenerate')
+  async regenerate(@Param('id') id: string, @Body() dto: RegenerateCaDto): Promise<RootCaSummary> {
+    const updated = await this.caService.regenerate(id, dto);
+    if (updated.archive.uploaded) {
+      return updated;
+    }
+    return this.tryArchive(id);
   }
 
   @Post(':id/retire')

@@ -16,10 +16,14 @@ export class NginxService {
     const listed = preferred.length ? preferred : cas.items;
     const caComments = listed.length
       ? listed
-          .map(
-            (item) =>
-              `#   - ${item.name}（下载 ${item.publicFileName}，状态：${item.status === 'active' ? '启用中' : '已停用'}）`,
-          )
+          .map((item) => {
+            const status = item.status === 'active' ? '启用中' : '已停用';
+            const regen =
+              (item.generation ?? 1) > 1
+                ? '，已重新生成并覆盖，客户端须改装新公钥'
+                : '';
+            return `#   - ${item.name}（下载 ${item.publicFileName}，状态：${status}${regen}）`;
+          })
           .join('\n')
       : '#   （尚未创建根证书）';
 
@@ -66,8 +70,14 @@ export class NginxService {
         name: item.name,
         status: item.status,
         publicFileName: item.publicFileName,
+        generation: item.generation ?? 1,
+        regeneratedAt: item.regeneratedAt,
       })),
-      note: '文件名不必叫 server.crt / server.key，只要 ssl_certificate 与 ssl_certificate_key 指向实际文件即可。',
+      note:
+        (cas.items.some((item) => item.status === 'active' && (item.generation ?? 1) > 1)
+          ? '若根证书已被重新生成并覆盖，客户端必须安装新的根公钥，且 Nginx 上应使用重新生成并重新上传后的服务器证书。'
+          : '') +
+        '文件名不必叫 server.crt / server.key，只要 ssl_certificate 与 ssl_certificate_key 指向实际文件即可。',
     };
   }
 }

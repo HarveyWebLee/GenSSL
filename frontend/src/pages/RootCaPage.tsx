@@ -12,6 +12,7 @@ import {
   Form,
   Input,
   InputNumber,
+  Modal,
   Row,
   Select,
   Space,
@@ -22,10 +23,17 @@ import {
 } from 'antd';
 import { DownloadOutlined, PlusOutlined } from '@ant-design/icons';
 import dayjs, { type Dayjs } from 'dayjs';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { getApiErrorMessage } from '../api/http';
-import { archiveCa, createCa, downloadCaCert, listCas, retireCa } from '../api/ssl';
-import type { CaCertFormat, CaHashAlgorithm, CaKeySize, CreateCaPayload, RootCaSummary } from '../api/types';
+import { archiveCa, createCa, downloadCaCert, listCas, regenerateCa, retireCa } from '../api/ssl';
+import type {
+  CaCertFormat,
+  CaHashAlgorithm,
+  CaKeySize,
+  CreateCaPayload,
+  RegenerateCaPayload,
+  RootCaSummary,
+} from '../api/types';
 import { AdvancedOptions } from '../components/AdvancedOptions';
 import { FieldHint } from '../components/FieldHint';
 import { NamePreview } from '../components/NamePreview';
@@ -34,6 +42,24 @@ import { PageHeader } from '../components/PageHeader';
 import { WorkflowBar } from '../components/WorkflowBar';
 import { suggestCaPublicFileName, withCertExtension } from '../utils/names';
 import { MAX_CERT_VALIDITY_DAYS } from '../utils/cert-validity';
+
+interface RegenFormValues {
+  days: number;
+  keySize: CaKeySize;
+  hashAlgorithm: CaHashAlgorithm;
+  notBefore?: Dayjs;
+}
+
+function hashFromSignature(signature: string): CaHashAlgorithm {
+  const value = signature.toLowerCase();
+  if (value.includes('sha384')) return 'sha384';
+  if (value.includes('sha512')) return 'sha512';
+  return 'sha256';
+}
+
+function validityDays(notBefore: string, notAfter: string): number {
+  return Math.max(1, Math.round((dayjs(notAfter).valueOf() - dayjs(notBefore).valueOf()) / (24 * 60 * 60 * 1000)));
+}
 
 interface CaFormValues {
   name: string;
@@ -92,10 +118,13 @@ function buildPayload(values: CaFormValues): CreateCaPayload {
 export function RootCaPage() {
   const { message, modal } = App.useApp();
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const selectedId = params.get('id');
   const [creating, setCreating] = useState(false);
+  const [regenOpen, setRegenOpen] = useState(false);
   const [form] = Form.useForm<CaFormValues>();
+  const [regenForm] = Form.useForm<RegenFormValues>();
 
   const query = useQuery({ queryKey: ['cas'], queryFn: listCas });
   const items = query.data?.items ?? [];
@@ -129,6 +158,26 @@ export function RootCaPage() {
     onError: (error) => message.error(getApiErrorMessage(error, '停用失败')),
   });
 
+  const regenMutation = useMutation({
+    mutationFn: (payload: RegenerateCaPayload) => regenerateCa(selectedId as string, payload),
+    onSuccess: async (updated) => {
+      await queryClient.invalidateQueries({ queryKey: ['cas'] });
+      await queryClient.invalidateQueries({ queryKey: ['certs'] });
+      await queryClient.invalidateQueries({ queryKey: ['overview'] });
+      await queryClient.invalidateQueries({ queryKey: ['archive'] });
+      await queryClient.invalidateQueries({ queryKey: ['deploys'] });
+      await queryClient.invalidateQueries({ queryKey: ['target-files'] });
+      await queryClient.invalidateQueries({ queryKey: ['guide'] });
+      setRegenOpen(false);
+      message.success(
+        updated.needsRegenerateCount
+          ? `根证书已重新生成并覆盖。已安装旧公钥的客户端必须改装新的根证书，否则浏览器不会信任新签发的服务器证书。另有 ${updated.needsRegenerateCount} 张服务器证书已变为不可用，需要重新生成并覆盖。`
+          : '根证书已重新生成并覆盖。已安装旧公钥的客户端必须改装新的根证书，否则浏览器不会信任新签发的服务器证书。',
+      );
+    },
+    onError: (error) => message.error(getApiErrorMessage(error, '重新生成并覆盖失败')),
+  });
+
   const archiveMutation = useMutation({
     mutationFn: archiveCa,
     onSuccess: async () => {
@@ -139,6 +188,30 @@ export function RootCaPage() {
     },
     onError: (error) => message.error(getApiErrorMessage(error, '上传到证书库失败')),
   });
+
+  const openRegenerate = (row: RootCaSummary) => {
+    const keySize: CaKeySize =
+      row.publicKeyBits === 2048 || row.publicKeyBits === 4096 || row.publicKeyBits === 8192
+        ? row.publicKeyBits
+        : 4096;
+    regenForm.setFieldsValue({
+      days: validityDays(row.notBefore, row.notAfter),
+      keySize,
+      hashAlgorithm: hashFromSignature(row.signatureAlgorithm),
+      notBefore: undefined,
+    });
+    setRegenOpen(true);
+  };
+
+  const submitRegenerate = (values: RegenFormValues) => {
+    const payload: RegenerateCaPayload = {
+      days: values.days,
+      keySize: values.keySize,
+      hashAlgorithm: values.hashAlgorithm,
+    };
+    if (values.notBefore) payload.notBefore = values.notBefore.toISOString();
+    regenMutation.mutate(payload);
+  };
 
   const confirmRetire = (row: RootCaSummary) => {
     modal.confirm({
@@ -191,6 +264,7 @@ export function RootCaPage() {
               },
               { title: '下属证书', dataIndex: 'certificateCount' },
               { title: '需重签', dataIndex: 'needsReissueCount' },
+              { title: '需重新生成并覆盖', dataIndex: 'needsRegenerateCount' },
               {
                 title: '证书库',
                 render: (_, row) =>
@@ -233,7 +307,45 @@ export function RootCaPage() {
                 type="warning"
                 showIcon
                 title="此根证书已停用"
-                description={`停用时间：${dayjs(selected.retiredAt).format('YYYY-MM-DD HH:mm')}。不能再签发新证书。已有 ${selected.needsReissueCount} 张服务器证书需要改用其他根重新签发。私钥仍保留在数据库中。`}
+                description={`停用时间：${dayjs(selected.retiredAt).format('YYYY-MM-DD HH:mm')}。不能再签发或重新生成服务器证书。已有 ${selected.needsReissueCount} 张服务器证书需要改用其他根重新签发。私钥仍保留在数据库中。`}
+              />
+            ) : null}
+            {selected.status === 'active' && (selected.generation ?? 1) > 1 ? (
+              <Alert
+                type="error"
+                showIcon
+                title="客户端必须重新安装这棵根的新公钥"
+                description={
+                  <Space orientation="vertical" size={8} style={{ width: '100%' }}>
+                    <span>
+                      此根已重新生成并覆盖（第 {selected.generation} 代
+                      {selected.regeneratedAt ? `，${dayjs(selected.regeneratedAt).format('YYYY-MM-DD HH:mm')}` : ''}
+                      ）。已经安装过旧版 {selected.publicFileName} 的电脑必须改下这次的新公钥，否则浏览器不会信任之后新签发的服务器证书。旧公钥无法校验新证书。
+                    </span>
+                    <Button type="link" style={{ padding: 0 }} onClick={() => navigate(`/guide?caId=${selected.id}`)}>
+                      查看客户端安装指引
+                    </Button>
+                  </Space>
+                }
+              />
+            ) : null}
+            {selected.status === 'active' && selected.needsRegenerateCount > 0 ? (
+              <Alert
+                type="warning"
+                showIcon
+                title="下属服务器证书不可用，需重新生成并覆盖"
+                description={
+                  <Space orientation="vertical" size={8} style={{ width: '100%' }}>
+                    <span>
+                      此根仍为启用中，但它已重新生成（第 {selected.generation} 代
+                      {selected.regeneratedAt ? `，${dayjs(selected.regeneratedAt).format('YYYY-MM-DD HH:mm')}` : ''}
+                      ）。覆盖前签发的 {selected.needsRegenerateCount} 张服务器证书与新的根私钥对不上，即使仍在有效期内也不可用。证书库中的旧档案会保留为不可用状态；部署目录不会自动改写，重新生成后还需再部署。
+                    </span>
+                    <Button type="link" style={{ padding: 0 }} onClick={() => navigate(`/certs?caId=${selected.id}`)}>
+                      去重新生成这些证书
+                    </Button>
+                  </Space>
+                }
               />
             ) : null}
             <CaDetailsView details={selected} />
@@ -259,14 +371,70 @@ export function RootCaPage() {
               </Space>
             </Card>
             {selected.status === 'active' ? (
-              <Button danger onClick={() => confirmRetire(selected)} loading={retireMutation.isPending}>
-                停用此根证书
-              </Button>
+              <Space wrap>
+                <Button onClick={() => openRegenerate(selected)} loading={regenMutation.isPending}>
+                  重新生成并覆盖
+                </Button>
+                <Button danger onClick={() => confirmRetire(selected)} loading={retireMutation.isPending}>
+                  停用此根证书
+                </Button>
+              </Space>
             ) : null}
             {selected.status === 'active' ? <NextStepCard after="ca" /> : null}
           </Space>
         ) : null}
       </Drawer>
+
+      <Modal
+        title={selected ? `重新生成并覆盖「${selected.name}」？` : '重新生成并覆盖'}
+        open={regenOpen}
+        onCancel={() => setRegenOpen(false)}
+        onOk={() => regenForm.submit()}
+        okText="确认重新生成并覆盖"
+        okButtonProps={{ danger: true }}
+        cancelText="取消"
+        confirmLoading={regenMutation.isPending}
+        destroyOnHidden
+      >
+        <Form form={regenForm} layout="vertical" onFinish={submitRegenerate}>
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 16 }}
+            title="会换成新的密钥和证书，已安装的旧根公钥将失效"
+            description="覆盖后这棵根仍保持启用，但会使用新的密钥和证书（同一 caId，不是另建一棵根）。已经把旧的根公钥（例如 rootCA.crt）装到电脑上的用户，必须改装下面即将生成的新公钥，否则浏览器不会信任之后新签发的服务器证书。该根下已签发的服务器证书将全部变为不可用，需要重新生成并覆盖。这与「停用根」不是同一操作。部署目录不会自动改写。"
+          />
+          <Form.Item
+            label="有效期（天）"
+            name="days"
+            rules={[{ required: true, message: '请填写有效期' }]}
+            extra="可在覆盖时调整。默认沿用当前有效期天数，最长 50 年（18250 天）。"
+          >
+            <InputNumber min={1} max={MAX_CERT_VALIDITY_DAYS} style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item label="生效时间" name="notBefore" extra="留空则使用当前时间。">
+            <DatePicker showTime style={{ width: '100%' }} placeholder="默认为现在" />
+          </Form.Item>
+          <Form.Item label="密钥长度" name="keySize" rules={[{ required: true }]}>
+            <Select
+              options={[
+                { value: 2048, label: '2048 位' },
+                { value: 4096, label: '4096 位（推荐）' },
+                { value: 8192, label: '8192 位（较慢）' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item label="签名算法" name="hashAlgorithm" rules={[{ required: true }]}>
+            <Select
+              options={[
+                { value: 'sha256', label: 'SHA-256' },
+                { value: 'sha384', label: 'SHA-384' },
+                { value: 'sha512', label: 'SHA-512' },
+              ]}
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
     </div>
   );
 }
@@ -427,6 +595,10 @@ function CaDetailsView({ details }: { details: RootCaSummary }) {
       <Descriptions.Item label="状态">
         {details.status === 'active' ? <Tag color="success">启用中</Tag> : <Tag>已停用</Tag>}
       </Descriptions.Item>
+      <Descriptions.Item label="代数">{details.generation}</Descriptions.Item>
+      <Descriptions.Item label="最近覆盖">
+        {details.regeneratedAt ? dayjs(details.regeneratedAt).format('YYYY-MM-DD HH:mm:ss') : '尚未覆盖'}
+      </Descriptions.Item>
       <Descriptions.Item label="是否为 CA">
         {details.isCA ? <Tag color="success">CA:TRUE</Tag> : <Tag color="error">CA:FALSE</Tag>}
       </Descriptions.Item>
@@ -503,11 +675,20 @@ function CaDownloadPanel({ details }: { details: RootCaSummary }) {
   return (
     <Card className="surface-card" title="下载根证书公钥">
       <Space orientation="vertical" size={16} style={{ width: '100%' }}>
-        <Alert
-          type="info"
-          showIcon
-          title="下载的是根证书公钥，用来安装到访问网站的电脑上。不会下载 rootCA.key。"
-        />
+        {(details.generation ?? 1) > 1 ? (
+          <Alert
+            type="error"
+            showIcon
+            title="请分发这次下载的新公钥"
+            description={`此根已重新生成并覆盖（第 ${details.generation} 代）。已经安装过旧版 ${details.publicFileName} 的电脑必须改装这次下载的文件，旧公钥无法校验新签发的服务器证书。不会下载 rootCA.key。`}
+          />
+        ) : (
+          <Alert
+            type="info"
+            showIcon
+            title="下载的是根证书公钥，用来安装到访问网站的电脑上。不会下载 rootCA.key。"
+          />
+        )}
         <Row gutter={16}>
           <Col xs={24} md={14}>
             <Space.Compact block>

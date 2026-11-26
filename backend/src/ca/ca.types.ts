@@ -39,9 +39,12 @@ export interface RootCaSummary {
   suggestedFileName: string;
   status: RootCaLifecycleStatus;
   retiredAt: string | null;
+  generation: number;
+  regeneratedAt: string | null;
   certificateCount: number;
   validCertificateCount: number;
   needsReissueCount: number;
+  needsRegenerateCount: number;
   archive: ArchiveStatus;
   createdAt: string;
   updatedAt: string;
@@ -54,4 +57,6 @@ export interface CaSigningMaterial {
   keyPem: string;
   publicFileName: string;
   status: RootCaLifecycleStatus;
+  generation: number;
+  fingerprintSha256: string;
 }

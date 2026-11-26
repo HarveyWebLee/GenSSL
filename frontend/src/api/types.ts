@@ -2,7 +2,8 @@ export type CaKeySize = 2048 | 4096 | 8192;
 export type CaHashAlgorithm = 'sha256' | 'sha384' | 'sha512';
 export type CaCertFormat = 'crt' | 'cer' | 'pem';
 export type RootCaLifecycleStatus = 'active' | 'retired';
-export type CertificateLifecycleStatus = 'valid' | 'expired' | 'not_yet_valid' | 'needs_reissue';
+export type CertificateLifecycleStatus = 'valid' | 'expired' | 'not_yet_valid' | 'needs_reissue' | 'needs_regenerate';
+export type CertificateUnavailableReason = 'ca_retired' | 'ca_regenerated' | null;
 
 export interface CaSubjectInfo {
   country?: string;
@@ -62,9 +63,12 @@ export interface RootCaSummary {
   suggestedFileName: string;
   status: RootCaLifecycleStatus;
   retiredAt: string | null;
+  generation: number;
+  regeneratedAt: string | null;
   certificateCount: number;
   validCertificateCount: number;
   needsReissueCount: number;
+  needsRegenerateCount: number;
   archive: ArchiveStatus;
   createdAt: string;
   updatedAt: string;
@@ -89,7 +93,39 @@ export interface NginxConfigResult {
   implemented: boolean;
   config: string;
   note?: string;
-  cas?: Array<{ id: string; name: string; status: RootCaLifecycleStatus; publicFileName: string }>;
+  cas?: Array<{
+    id: string;
+    name: string;
+    status: RootCaLifecycleStatus;
+    publicFileName: string;
+    generation?: number;
+    regeneratedAt?: string | null;
+  }>;
+}
+
+export interface RegenerateCaPayload {
+  days?: number;
+  notBefore?: string;
+  keySize?: CaKeySize;
+  hashAlgorithm?: CaHashAlgorithm;
+  pathLenConstraint?: number;
+}
+
+export interface RegenerateCertPayload {
+  days?: number;
+  notBefore?: string;
+  keySize?: 2048 | 4096;
+  hashAlgorithm?: CaHashAlgorithm;
+}
+
+export interface RegenerateCertsBatchPayload extends RegenerateCertPayload {
+  ids?: string[];
+  caId?: string;
+}
+
+export interface RegenerateCertsBatchResult {
+  items: CertificateDetail[];
+  failed: Array<{ id: string; name?: string; message: string }>;
 }
 
 export interface IssueCertPayload {
@@ -130,6 +166,8 @@ export interface CertificateCaRef {
   commonName: string;
   status: RootCaLifecycleStatus;
   publicFileName: string;
+  generation?: number;
+  fingerprintSha256?: string;
 }
 
 export interface CertificateSummary {
@@ -151,6 +189,9 @@ export interface CertificateSummary {
   ca: CertificateCaRef;
   status: CertificateLifecycleStatus;
   statusLabel: string;
+  unavailableReason?: CertificateUnavailableReason;
+  caGeneration?: number;
+  warning?: string;
   archive: ArchiveStatus;
 }
 
@@ -161,6 +202,8 @@ export interface CertificateDetail extends CertificateSummary {
   isCA: boolean;
   verification: CertVerification;
 }
+
+export type SshAuthMethod = 'password' | 'privateKey';
 
 export interface ServerPath {
   id: string;
@@ -175,9 +218,61 @@ export interface ServerRecord {
   name: string;
   host: string | null;
   description: string | null;
+  sshPort: number;
+  sshUsername: string | null;
+  sshAuthMethod: SshAuthMethod;
+  sshTimeoutMs: number;
+  hasPassword: boolean;
+  hasPrivateKey: boolean;
+  hasPassphrase: boolean;
+  sshReady: boolean;
+  sshReadyReason: string | null;
+  sshHostKeyPinned: boolean;
+  sshHostKeyFingerprint: string | null;
+  sshHostKeyPinnedAt: string | null;
   paths: ServerPath[];
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ServerWritePayload {
+  name?: string;
+  host?: string;
+  description?: string;
+  sshPort?: number;
+  sshUsername?: string;
+  sshAuthMethod?: SshAuthMethod;
+  sshPassword?: string;
+  sshPrivateKey?: string;
+  sshPassphrase?: string;
+  sshTimeoutMs?: number;
+  clearSshCredentials?: boolean;
+  clearSshPassword?: boolean;
+  clearSshPrivateKey?: boolean;
+  clearSshPassphrase?: boolean;
+  resetSshHostKey?: boolean;
+}
+
+export interface TestConnectionPayload extends ServerWritePayload {
+  serverId?: string;
+  pathId?: string;
+  remotePath?: string;
+  trustHostKey?: boolean;
+}
+
+export interface TestConnectionResult {
+  ok: true;
+  host: string;
+  port: number;
+  username: string;
+  destination: string;
+  path: string | null;
+  pathExists: boolean | null;
+  pathListable: boolean;
+  hostKeyFingerprint: string;
+  hostKeyPinned: boolean;
+  hostKeyNewlyTrusted: boolean;
+  message: string;
 }
 
 export interface DeployedFile {
@@ -185,6 +280,15 @@ export interface DeployedFile {
   fileName: string;
   objectKey: string;
   size: number;
+  remotePath?: string;
+}
+
+export interface RemoteDestination {
+  host: string;
+  port: number;
+  username: string;
+  path: string;
+  destination: string;
 }
 
 export interface DeployRecord {
@@ -198,12 +302,23 @@ export interface DeployRecord {
     publicFileName?: string;
     keyFileName?: string;
     caId?: string;
+    status?: CertificateLifecycleStatus;
+    statusLabel?: string;
+    fingerprintSha256?: string;
   };
-  server: { id: string; name?: string; host?: string | null };
+  server: { id: string; name?: string; host?: string | null; sshReady?: boolean; sshReadyReason?: string | null };
   path: { id: string; path?: string; label?: string | null };
   objectPrefix: string;
   files: DeployedFile[];
   overwritten: boolean;
+  certificateFingerprintSha256?: string;
+  stale: boolean;
+  staleReason?: 'certificate_overwritten' | 'certificate_unavailable' | null;
+  staleLabel?: string | null;
+  status?: 'success' | 'failed';
+  errorMessage?: string | null;
+  remote?: RemoteDestination | null;
+  rustfsSynced?: boolean;
   createdAt: string;
   warning?: string;
 }
@@ -211,7 +326,7 @@ export interface DeployRecord {
 export interface TargetFileList {
   storageKind: 'deploy';
   storageLabel: string;
-  server: { id: string; name: string; host: string | null };
+  server: { id: string; name: string; host: string | null; sshReady?: boolean; sshReadyReason?: string | null };
   path: { id: string; path: string; label: string | null };
   prefix: string;
   files: Array<{
@@ -222,7 +337,22 @@ export interface TargetFileList {
     kind: 'server-cert' | 'server-key' | 'ca-cert' | 'unknown';
     storageKind?: 'deploy';
   }>;
+  rustfsError?: string | null;
+  remote?: {
+    destination: string;
+    exists: boolean;
+    files: Array<{
+      fileName: string;
+      path: string;
+      size: number;
+      lastModified?: string;
+      kind: string;
+    }>;
+    error?: string;
+  } | null;
   latestDeploy: DeployRecord | null;
+  deployStale?: boolean;
+  deployStaleLabel?: string | null;
 }
 
 export interface StorageKindStats {
@@ -248,13 +378,19 @@ export interface OverviewData {
       certificateCount: number;
       validCertificateCount: number;
       needsReissueCount: number;
+      needsRegenerateCount: number;
+      generation?: number;
+      regeneratedAt?: string | null;
       archive: ArchiveStatus;
     }>;
   };
   certificateCount: number;
   validCertificateCount: number;
   needsReissueCount: number;
+  needsRegenerateCount: number;
   expiredCertificateCount: number;
+  staleDeployCount: number;
+  regeneratedActiveCaCount: number;
   serverCount: number;
   storage: {
     ready: boolean;
@@ -272,7 +408,15 @@ export interface ArchiveLibrary {
   prefix: string;
   storage: { ready: boolean; endpoint?: string; bucket?: string; lastError?: string | null };
   rustfsFiles: { cas: Array<{ key: string; size: number }>; certs: Array<{ key: string; size: number }> } | null;
-  cas: Array<{ id: string; name: string; status: RootCaLifecycleStatus; publicFileName: string; archive: ArchiveStatus }>;
+  cas: Array<{
+    id: string;
+    name: string;
+    status: RootCaLifecycleStatus;
+    publicFileName: string;
+    generation?: number;
+    regeneratedAt?: string | null;
+    archive: ArchiveStatus;
+  }>;
   certificates: Array<{
     id: string;
     name: string;
@@ -286,10 +430,20 @@ export interface ArchiveLibrary {
   note: string;
 }
 
+export interface TrustCaRef {
+  id: string;
+  name: string;
+  status: RootCaLifecycleStatus;
+  publicFileName: string;
+  generation?: number;
+  regeneratedAt?: string | null;
+  wasRegenerated?: boolean;
+}
+
 export interface WindowsTrustGuide {
   implemented: boolean;
-  selectedCa: { id: string; name: string; status: RootCaLifecycleStatus; publicFileName: string } | null;
-  cas: Array<{ id: string; name: string; status: RootCaLifecycleStatus; publicFileName: string }>;
+  selectedCa: TrustCaRef | null;
+  cas: TrustCaRef[];
   steps: string[];
   warning: string;
 }

@@ -5,6 +5,7 @@ import { getApiErrorMessage } from '../api/http';
 import { downloadStoredObject, getArchiveLibrary } from '../api/ssl';
 import { PageHeader } from '../components/PageHeader';
 import { WorkflowBar } from '../components/WorkflowBar';
+import { certStatusColor } from '../utils/cert-status';
 
 export function ArchivePage() {
   const navigate = useNavigate();
@@ -48,8 +49,14 @@ export function ArchivePage() {
                 {
                   title: '状态',
                   dataIndex: 'status',
-                  render: (status: string) =>
-                    status === 'active' ? <Tag color="success">启用中</Tag> : <Tag>已停用</Tag>,
+                  render: (status: string, row) => (
+                    <Space size={4} wrap>
+                      {status === 'active' ? <Tag color="success">启用中</Tag> : <Tag>已停用</Tag>}
+                      {status === 'active' && (row.generation ?? 1) > 1 ? (
+                        <Tag color="warning">已覆盖，需改装公钥</Tag>
+                      ) : null}
+                    </Space>
+                  ),
                 },
                 { title: '文件名', dataIndex: 'publicFileName' },
                 {
@@ -98,9 +105,7 @@ export function ArchivePage() {
                 {
                   title: '状态',
                   dataIndex: 'statusLabel',
-                  render: (label: string, row) => (
-                    <Tag color={row.status === 'valid' ? 'success' : 'warning'}>{label}</Tag>
-                  ),
+                  render: (label: string, row) => <Tag color={certStatusColor(row.status)}>{label}</Tag>,
                 },
                 {
                   title: '档案文件',
@@ -119,9 +124,25 @@ export function ArchivePage() {
                 {
                   title: '操作',
                   render: (_, row) => (
-                    <Button size="small" onClick={() => navigate(`/certs?id=${row.id}`)}>
-                      查看
-                    </Button>
+                    <Space>
+                      <Button size="small" onClick={() => navigate(`/certs?id=${row.id}`)}>
+                        查看
+                      </Button>
+                      {row.status === 'needs_regenerate' ? (
+                        <Button
+                          size="small"
+                          type="primary"
+                          onClick={() => navigate(`/certs?id=${row.id}&status=needs_regenerate`)}
+                        >
+                          去重新生成并覆盖
+                        </Button>
+                      ) : null}
+                      {row.status === 'needs_reissue' ? (
+                        <Button size="small" onClick={() => navigate('/issue')}>
+                          去重新签发
+                        </Button>
+                      ) : null}
+                    </Space>
                   ),
                 },
               ]}

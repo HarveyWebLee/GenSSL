@@ -63,6 +63,13 @@ export class RootCaEntity {
   @Column({ type: 'timestamptz', nullable: true })
   retiredAt!: Date | null;
 
+  /** 同一棵根被重新生成并覆盖后递增，用来判断下属证书是否仍由当前私钥签发。 */
+  @Column({ type: 'int', default: 1 })
+  generation!: number;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  regeneratedAt!: Date | null;
+
   /** 根 CA 私钥，仅存数据库，select: false，永不进入 API 或 RustFS。 */
   @Column({ type: 'text', select: false })
   privateKeyPem!: string;
