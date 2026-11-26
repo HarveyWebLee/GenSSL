@@ -239,11 +239,24 @@ RUSTFS_LOGS_PATH=D:/genssl-data/rustfs-logs
 
 2. 构建并启动：
 
+如果已安装 Docker Compose 插件（`docker compose version` 能显示 Compose 版本）：
+
 ```bash
 docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
 ```
 
-或：`npm run prod:up`（同样读取 `.env.production`）。查看状态：`npm run prod:ps`。停止：`npm run prod:down`（默认保留你配置的宿主机数据目录）。
+如果提示 `'compose' is not a docker command`，但已安装独立的 Compose V2（`docker-compose version` 显示 `Docker Compose version v2.x`），请改用：
+
+```bash
+docker-compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+```
+
+这两条命令等价，生产编排需要 Compose V2。也可以执行 `npm run prod:up`（同样读取 `.env.production`）；该脚本调用的是 `docker compose`，在只有独立 `docker-compose` 的机器上请直接使用上面带连字符的命令。查看状态：`npm run prod:ps`。停止：`npm run prod:down`（默认保留你配置的宿主机数据目录）。对应的独立命令是：
+
+```bash
+docker-compose -f docker-compose.prod.yml --env-file .env.production ps
+docker-compose -f docker-compose.prod.yml --env-file .env.production down
+```
 
 3. 访问：
 

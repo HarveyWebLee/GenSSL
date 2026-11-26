@@ -2,6 +2,8 @@
 # 启动（在项目根目录）：
 #   cp .env.production.example .env.production   # 然后更换密码和密钥
 #   docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+#   若没有 Compose 插件、只有独立命令，改用：
+#   docker-compose -f docker-compose.prod.yml --env-file .env.production up -d --build
 #
 # 发布端口：
 #   前端管理界面  18347 -> 容器内 Nginx 18347
