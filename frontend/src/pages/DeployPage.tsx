@@ -329,13 +329,20 @@ export function DeployPage() {
                 options={certs.map((item) => ({
                   value: item.id,
                   label: certLabel(item),
-                  disabled: item.status === 'needs_regenerate',
-                  title: item.status === 'needs_regenerate' ? DEPLOY_BLOCKED_REASON : undefined,
+                  disabled: item.status === 'needs_regenerate' || Boolean(item.ca.deleted),
+                  title: item.ca.deleted
+                    ? '所属根证书已删除，不能再部署到服务器。'
+                    : item.status === 'needs_regenerate'
+                      ? DEPLOY_BLOCKED_REASON
+                      : undefined,
                 }))}
               />
             </Form.Item>
             {selectedCert?.status === 'needs_reissue' ? (
               <Alert type="warning" showIcon style={{ marginBottom: 16 }} title={DEPLOY_REISSUE_WARNING} />
+            ) : null}
+            {selectedCert?.ca.deleted ? (
+              <Alert type="error" showIcon style={{ marginBottom: 16 }} title="所属根证书已删除，不能再部署到服务器。" />
             ) : null}
             {selectedCert?.status === 'needs_regenerate' ? (
               <Alert type="error" showIcon style={{ marginBottom: 16 }} title={DEPLOY_BLOCKED_REASON} />

@@ -4,11 +4,12 @@ import { assertSafeObjectKey, assertSafeUploadFileName, isForbiddenUploadName } 
 
 export const ARCHIVE_ROOT = 'archive';
 export const DEPLOY_ROOT = 'deploy';
+export const NGINX_ROOT = 'nginx';
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-export type StorageKind = 'archive' | 'deploy';
+export type StorageKind = 'archive' | 'deploy' | 'nginx';
 
 export function sanitizeKeySegment(raw: string): string {
   const value = raw
@@ -109,7 +110,12 @@ export function classifyStorageKind(objectKey: string): StorageKind {
   if (key === DEPLOY_ROOT || key.startsWith(`${DEPLOY_ROOT}/`)) {
     return 'deploy';
   }
-  throw new BadRequestException('对象键必须位于证书库（archive/）或服务器部署目录（deploy/）下。');
+  if (key === NGINX_ROOT || key.startsWith(`${NGINX_ROOT}/`)) {
+    return 'nginx';
+  }
+  throw new BadRequestException(
+    '对象键必须位于证书库（archive/）、服务器部署目录（deploy/）或 Nginx 配置管理副本（nginx/）下。',
+  );
 }
 
 export function assertArchiveObjectKey(objectKey: string): string {
@@ -129,7 +135,26 @@ export function assertDeployObjectKey(objectKey: string): string {
 }
 
 export function storageKindLabel(kind: StorageKind): string {
-  return kind === 'archive' ? '证书库' : '服务器部署目录';
+  if (kind === 'archive') {
+    return '证书库';
+  }
+  if (kind === 'nginx') {
+    return 'Nginx 配置管理副本';
+  }
+  return '服务器部署目录';
+}
+
+/** Nginx 服务当前配置在文件服务器中的管理副本，不是服务器上的真实文件。 */
+export function buildNginxServiceObjectKey(serviceId: string, fileName = 'current.conf'): string {
+  const id = assertUuidSegment(serviceId, 'Nginx 服务 ID');
+  return assertSafeObjectKey(`${NGINX_ROOT}/services/${id}/${fileBaseName(fileName)}`);
+}
+
+/** 某次发布的配置快照，发布成功后作为管理档案保留。 */
+export function buildNginxReleaseObjectKey(serviceId: string, releaseId: string, fileName = 'service.conf'): string {
+  const service = assertUuidSegment(serviceId, 'Nginx 服务 ID');
+  const release = assertUuidSegment(releaseId, '发布记录 ID');
+  return assertSafeObjectKey(`${NGINX_ROOT}/services/${service}/releases/${release}/${fileBaseName(fileName)}`);
 }
 
 export function fileNameFromObjectKey(objectKey: string): string {

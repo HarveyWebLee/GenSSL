@@ -208,6 +208,11 @@ export class DeployService {
 
   async deploy(dto: CreateDeployDto) {
     const certificate = await this.certsService.findRecord(dto.certificateId);
+    if (certificate.ca?.deletedAt) {
+      throw new BadRequestException(
+        '该证书所属根证书已删除，不能再部署到服务器目录。',
+      );
+    }
     const status = this.certStatus(certificate);
     if (status === 'needs_regenerate') {
       throw new BadRequestException(

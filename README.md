@@ -128,9 +128,11 @@ npm run dev
    默认为 RSA 2048、397 天、CA:FALSE、serverAuth。可选附加 DNS 名称。签发后会校验证书链、SAN、有效期以及与私钥是否匹配。服务器证书和服务器私钥写入证书库 `archive/certs/<caId>/<certId>/`，不会自动部署到服务器目录。
 3. **登记目标服务器与路径**（「服务器与路径」页）：例如服务器 `web-01`，填写 SSH 主机、端口（默认 22）、用户名，以及密码或私钥；部署目录为远程绝对路径，例如 `/etc/nginx/ssl`。保存后可使用「测试连接」检查登录和目录是否可访问（不会创建目录，也不会上传证书）。
 4. **上传部署**（「上传部署」页）：选择证书、目标服务器和路径，平台通过 SFTP 把服务器证书和私钥（可选再带根证书公钥）写入远程目录，文件名沿用证书自己的公钥/私钥文件名。同时在 RustFS `deploy/<serverName>/<path>/` 保留一份管理副本。这与证书库不是同一处。远程目录或管理副本已有同名文件时需确认覆盖。未配置 SSH 或连接/上传失败时，接口会明确失败，不会仅因管理副本写入成功而报成功。
-5. 在「Nginx 配置」页生成配置示例：`ssl_certificate` / `ssl_certificate_key` 须指向远程目录中实际上传后的文件（文件名沿用证书自己的名称，例如 `/etc/nginx/ssl/192.168.99.242.crt`），不要指向 RustFS 管理副本。`server_name` 可直接写 IP，须与证书 SAN 一致且不要带端口。非 443 端口请用 `https://IP:端口` 访问。客户端安装的必须是签发该服务器证书的那棵根的公钥。
+5. 在「Nginx 配置」页为已登记服务器添加端口服务：填写名称、端口、远程 `.conf` 绝对路径（例如 `/data/smartsecurity/nginx/vhost/avatar.conf`）和重启命令（例如 `docker restart nginx`）。可在线编辑或上传配置，保存后会写入文件服务器管理副本。发布时填写版本号和备注，确认后将配置覆盖到服务器上的真实路径，成功后再执行该服务上的重启命令。也可查看版本时间线、下载历史 conf、重新发布或手动重启。页面上的配置示例仍可生成并插入编辑器；`ssl_certificate` / `ssl_certificate_key` 须指向远程目录中实际上传后的文件，不要指向 RustFS 管理副本。客户端安装的必须是签发该服务器证书的那棵根的公钥。
 
 停用某棵根后：不能再用它签发；它签过的服务器证书会显示为「已失效（需重签）」。私钥和历史都会保留，直到客户端和 Nginx 都切走。
+
+根证书和签发证书、Nginx 服务及其发布版本都支持假删除：数据库中标记删除状态，页面和其他选择器中不再显示，但不会销毁私钥或 RustFS 档案。删除根证书时，不会自动删除其下尚未删除的签发证书。
 
 同一棵根「重新生成并覆盖」后：仍保持启用（同一 `caId`，generation 递增），但密钥和证书会更换。已经安装过旧公钥的客户端必须改装新的根公钥，否则浏览器不会信任新签发的服务器证书。该根下旧的服务器证书会显示为「不可用，需重新生成并覆盖」，不能再部署；重新生成只更新证书库，远程目录和管理副本中的旧文件会标为已过时，需要重新上传并覆盖（包括覆盖远程服务器上的同名文件）。这与「停用根」不是同一操作。
 
@@ -182,7 +184,17 @@ npm run dev
 | GET/POST | `/deploys` | 部署记录 / 通过 SFTP 上传到远程证书目录（并写管理副本） |
 | GET | `/servers/:serverId/paths/:pathId/files` | 列出远程目录和管理副本中的文件 |
 | GET | `/storage/objects?key=` | 从 RustFS 下载对象（仅 `archive/` 或 `deploy/`，拒绝 rootCA.key） |
+| DELETE | `/ca/:id` | 软删除根证书（列表不可见，不销毁私钥和档案） |
+| DELETE | `/certs/:id` | 软删除签发证书（列表不可见，不可再部署） |
 | POST | `/nginx/config` | 生成 Nginx 配置示例（含应安装的根证书说明） |
+| GET/POST | `/nginx/services` | 列出或创建 Nginx 服务（可按 `serverId` 筛选） |
+| GET/PATCH/DELETE | `/nginx/services/:id` | 读取、更新或软删除某个服务 |
+| POST | `/nginx/services/:id/publish` | 发布新版本（覆盖远程 conf 后执行服务上的重启命令） |
+| POST | `/nginx/services/:id/restart` | 在目标服务器上执行该服务配置的重启命令 |
+| GET | `/nginx/services/:id/releases` | 列出版本时间线 |
+| GET/PATCH/DELETE | `/nginx/services/:id/releases/:releaseId` | 读取、改备注或软删除某个版本 |
+| GET | `/nginx/services/:id/releases/:releaseId/download` | 下载该版本 conf |
+| POST | `/nginx/services/:id/releases/:releaseId/republish` | 将历史版本重新覆盖到服务器，并执行当前重启命令 |
 | GET | `/guides/windows-trust?caId=` | 客户端安装指定根证书的指引 |
 
 ## 构建与测试

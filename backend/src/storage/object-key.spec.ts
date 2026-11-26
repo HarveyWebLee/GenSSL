@@ -12,6 +12,8 @@ import {
   buildDeployObjectKey,
   buildDeployObjectPrefix,
   classifyStorageKind,
+  buildNginxServiceObjectKey,
+  buildNginxReleaseObjectKey,
   normalizeDeployPath,
 } from './object-key';
 
@@ -99,4 +101,16 @@ describe('object-key', () => {
       (error: unknown) => error instanceof BadRequestException,
     );
   });
+
+  it('builds nginx management-copy keys under nginx/services', () => {
+    const serviceId = '33333333-3333-4333-8333-333333333333';
+    const releaseId = '44444444-4444-4444-8444-444444444444';
+    assert.equal(buildNginxServiceObjectKey(serviceId, 'avatar.conf'), `nginx/services/${serviceId}/avatar.conf`);
+    assert.equal(
+      buildNginxReleaseObjectKey(serviceId, releaseId, 'avatar-1.0.0.conf'),
+      `nginx/services/${serviceId}/releases/${releaseId}/avatar-1.0.0.conf`,
+    );
+    assert.equal(classifyStorageKind(`nginx/services/${serviceId}/avatar.conf`), 'nginx');
+  });
+
 });

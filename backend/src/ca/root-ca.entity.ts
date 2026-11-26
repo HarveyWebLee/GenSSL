@@ -2,6 +2,7 @@ import {
   Column,
   CreateDateColumn,
   Entity,
+  Index,
   OneToMany,
   PrimaryGeneratedColumn,
   UpdateDateColumn,
@@ -11,11 +12,12 @@ import { IssuedCertificateEntity } from '../certs/issued-certificate.entity';
 export type RootCaLifecycleStatus = 'active' | 'retired';
 
 @Entity('root_cas')
+@Index('UQ_root_cas_name_active', ['name'], { unique: true, where: '"deletedAt" IS NULL' })
 export class RootCaEntity {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 
-  @Column({ unique: true, length: 128 })
+  @Column({ length: 128 })
   name!: string;
 
   @Column({ length: 128 })
@@ -83,6 +85,10 @@ export class RootCaEntity {
 
   @Column({ type: 'timestamptz', nullable: true })
   archiveUploadedAt!: Date | null;
+
+  /** 软删除时间；有值表示已从管理界面隐藏，私钥与证书库档案仍保留。 */
+  @Column({ type: 'timestamptz', nullable: true })
+  deletedAt!: Date | null;
 
   @OneToMany(() => IssuedCertificateEntity, (cert) => cert.ca)
   certificates!: IssuedCertificateEntity[];

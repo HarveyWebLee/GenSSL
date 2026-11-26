@@ -3,6 +3,9 @@ import { assertSafeUploadFileName, isForbiddenUploadName } from '../storage/uplo
 
 const MAX_DIR_LENGTH = 512;
 const MAX_FILE_NAME = 200;
+const MAX_CONF_PATH = 512;
+const MAX_RESTART_COMMAND = 500;
+const CONF_SUFFIX = /\.conf$/i;
 const WINDOWS_DRIVE = /^[A-Za-z]:$/;
 const WINDOWS_ABS = /^[A-Za-z]:[\\/]/;
 const WINDOWS_SFTP = /^\/[A-Za-z]:(\/|$)/;
@@ -98,4 +101,78 @@ function splitRemoteSegments(path: string): string[] {
     return parts.slice(1);
   }
   return parts;
+}
+
+export function assertSafeRemoteConfPath(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    throw new BadRequestException('Nginx 配置文件路径不能为空。');
+  }
+  if (trimmed.includes('\0') || /[\u0000-\u001F]/.test(trimmed)) {
+    throw new BadRequestException('Nginx 配置文件路径包含非法字符。');
+  }
+  if (trimmed.length > MAX_CONF_PATH) {
+    throw new BadRequestException('Nginx 配置文件路径过长。');
+  }
+  if (!CONF_SUFFIX.test(trimmed)) {
+    throw new BadRequestException('Nginx 配置文件路径必须以 .conf 结尾。');
+  }
+
+  const unified = trimmed.replace(/\\/g, '/');
+  if (!isAbsoluteRemotePath(unified)) {
+    throw new BadRequestException(
+      'Nginx 配置文件路径必须是绝对路径，例如 /data/smartsecurity/nginx/vhost/avatar.conf。',
+    );
+  }
+
+  const parts = splitRemoteSegments(unified);
+  for (const part of parts) {
+    if (part === '..') {
+      throw new BadRequestException('Nginx 配置文件路径不能包含「..」。');
+    }
+  }
+  if (parts.length === 0) {
+    throw new BadRequestException('Nginx 配置文件路径无效。');
+  }
+
+  const fileName = parts[parts.length - 1] ?? '';
+  if (!fileName || fileName === '.conf' || !CONF_SUFFIX.test(fileName)) {
+    throw new BadRequestException('Nginx 配置文件名无效，必须以 .conf 结尾。');
+  }
+  if (fileName.includes('\\') || fileName.includes('/')) {
+    throw new BadRequestException('Nginx 配置文件名不能包含路径分隔符。');
+  }
+
+  const parentRaw = unified.slice(0, unified.length - fileName.length).replace(/\/+$/, '');
+  if (!parentRaw || parentRaw === fileName) {
+    throw new BadRequestException('Nginx 配置文件路径必须包含所在目录，不能只填写文件名。');
+  }
+  const directory = assertSafeRemoteDirectory(parentRaw);
+  return joinRemoteFile(directory, fileName);
+}
+
+export function splitRemoteConfPath(raw: string): { path: string; directory: string; fileName: string } {
+  const confPath = assertSafeRemoteConfPath(raw);
+  const index = confPath.lastIndexOf('/');
+  return {
+    path: confPath,
+    directory: confPath.slice(0, index) || '/',
+    fileName: confPath.slice(index + 1),
+  };
+}
+
+export function assertRestartCommand(raw: string): string {
+  const value = raw.trim();
+  if (!value) {
+    throw new BadRequestException(
+      '请填写重启服务命令。该命令将在目标服务器上通过 SSH 执行，不会在本管理平台本机执行。',
+    );
+  }
+  if (value.length > MAX_RESTART_COMMAND) {
+    throw new BadRequestException('重启服务命令过长，请控制在 500 个字符以内。');
+  }
+  if (/[\u0000-\u0008\u000A-\u001F]/.test(value)) {
+    throw new BadRequestException('重启服务命令包含非法字符，请使用单行命令。');
+  }
+  return value;
 }

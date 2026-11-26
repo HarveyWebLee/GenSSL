@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { BadRequestException, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import * as forge from 'node-forge';
 import { ArchiveService } from '../archive/archive.service';
 import { CaService } from '../ca/ca.service';
@@ -194,4 +194,54 @@ describe('CertsService (multi-root, archive on RustFS)', () => {
     assert.ok(result.items.every((item) => item.status === 'valid'));
     assert.ok(result.items.every((item) => item.caGeneration === 2));
   });
+
+  it('soft-deletes an issued certificate so lists hide it, names can be reused, and it cannot be loaded for deploy', async () => {
+    const { certsService, certs, root } = await setup();
+    const issued = await certsService.issue({
+      caId: root.id,
+      name: 'avatar',
+      ips: ['10.0.0.9'],
+      keySize: 2048,
+    });
+    const result = await certsService.softDelete(issued.id);
+    assert.equal(result.ok, true);
+    assert.ok(certs.items.find((item) => item.id === issued.id)?.deletedAt);
+    assert.equal((await certsService.list()).items.length, 0);
+    assert.equal(await certsService.count(), 0);
+    await assert.rejects(() => certsService.findRecord(issued.id), (error: unknown) => error instanceof NotFoundException);
+    await assert.rejects(() => certsService.getDetail(issued.id), (error: unknown) => error instanceof NotFoundException);
+
+    const reused = await certsService.issue({
+      caId: root.id,
+      name: 'avatar',
+      ips: ['10.0.0.9'],
+      keySize: 2048,
+    });
+    assert.notEqual(reused.id, issued.id);
+    assert.equal((await certsService.list()).items.length, 1);
+
+    await assert.rejects(
+      () => certsService.issue({ caId: root.id, name: 'avatar', ips: ['10.0.0.10'], keySize: 2048 }),
+      (error: unknown) => error instanceof ConflictException,
+    );
+  });
+
+  it('keeps undeleted certificates visible after the parent root is soft-deleted, but blocks signing', async () => {
+    const { certsService, caService, root } = await setup();
+    const issued = await certsService.issue({ caId: root.id, ips: ['10.0.0.11'], keySize: 2048 });
+    await caService.softDelete(root.id);
+    const listed = await certsService.list();
+    assert.equal(listed.items.length, 1);
+    assert.equal(listed.items[0]!.id, issued.id);
+    assert.equal(listed.items[0]!.ca.deleted, true);
+    await assert.rejects(
+      () => certsService.regenerate(issued.id),
+      (error: unknown) => {
+        assert.ok(error instanceof BadRequestException);
+        assert.match(String((error as BadRequestException).message), /已删除/);
+        return true;
+      },
+    );
+  });
+
 });

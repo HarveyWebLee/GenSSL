@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Query, Res, StreamableFile } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Query, Res, StreamableFile } from '@nestjs/common';
 import type { Response } from 'express';
 import { CertsService } from './certs.service';
 import { DownloadCertQueryDto } from './dto/download-cert.dto';
@@ -49,6 +49,11 @@ export class CertsController {
     }
     res.set(headers);
     return new StreamableFile(result.stream);
+  }
+
+  @Delete(':id')
+  softDelete(@Param('id') id: string) {
+    return this.certsService.softDelete(id);
   }
 
   @Get(':id')

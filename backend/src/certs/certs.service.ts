@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { PassThrough, Readable } from 'node:stream';
 import archiver from 'archiver';
 import * as forge from 'node-forge';
-import { Repository } from 'typeorm';
+import { IsNull, Repository } from 'typeorm';
 import { ArchiveService } from '../archive/archive.service';
 import { CaService } from '../ca/ca.service';
 import {
@@ -58,6 +58,7 @@ export interface CertificateCaRef {
   publicFileName: string;
   generation: number;
   fingerprintSha256: string;
+  deleted: boolean;
 }
 
 export interface CertificateSummary {
@@ -119,7 +120,11 @@ export class CertsService {
   ) {}
 
   async list(): Promise<{ items: CertificateSummary[] }> {
-    const rows = await this.repo.find({ relations: { ca: true }, order: { createdAt: 'DESC' } });
+    const rows = await this.repo.find({
+      where: { deletedAt: IsNull() },
+      relations: { ca: true },
+      order: { createdAt: 'DESC' },
+    });
     const items = [];
     for (const row of rows) {
       items.push(this.toSummary(await this.hydrateCa(row)));
@@ -135,7 +140,7 @@ export class CertsService {
     const commonName = (dto.commonName?.trim() || san.ips[0]) as string;
     const name = this.resolveRecordName(dto.name, commonName, san.ips[0]);
 
-    const existing = await this.repo.findOne({ where: { caId: ca.id, name } });
+    const existing = await this.repo.findOne({ where: { caId: ca.id, name, deletedAt: IsNull() } });
     if (existing) {
       throw new ConflictException(
         `根证书「${ca.name}」下已有名为「${name}」的服务器证书。请使用不同名称另行签发，以保留历史记录。`,
@@ -466,23 +471,34 @@ export class CertsService {
     };
   }
 
-  async findRecord(idOrName: string): Promise<IssuedCertificateEntity> {
+  async findRecord(idOrName: string, options?: { includeDeleted?: boolean }): Promise<IssuedCertificateEntity> {
     const uuidRe =
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    const scope = options?.includeDeleted ? {} : { deletedAt: IsNull() };
     const row = uuidRe.test(idOrName)
       ? await this.repo.findOne({
-          where: [{ id: idOrName }, { name: idOrName }],
+          where: [
+            { id: idOrName, ...scope },
+            { name: idOrName, ...scope },
+          ],
           relations: { ca: true },
         })
-      : await this.repo.findOne({ where: { name: idOrName }, relations: { ca: true } });
-    if (!row) {
+      : await this.repo.findOne({ where: { name: idOrName, ...scope }, relations: { ca: true } });
+    if (!row || (row.deletedAt && !options?.includeDeleted)) {
       throw new NotFoundException(`未找到该服务器证书。`);
     }
     return this.hydrateCa(row);
   }
 
   async count(): Promise<number> {
-    return this.repo.count();
+    return this.repo.count({ where: { deletedAt: IsNull() } });
+  }
+
+  async softDelete(id: string): Promise<{ ok: true; id: string }> {
+    const row = await this.findRecord(id);
+    row.deletedAt = new Date();
+    await this.repo.save(row);
+    return { ok: true, id: row.id };
   }
 
   async listSerialNumbers(): Promise<string[]> {
@@ -494,7 +510,7 @@ export class CertsService {
     if (row.ca) {
       return row;
     }
-    const ca = await this.caService.findRecord(row.caId);
+    const ca = await this.caService.findRecord(row.caId, { includeDeleted: true });
     row.ca = ca;
     return row;
   }
@@ -534,6 +550,7 @@ export class CertsService {
         publicFileName: row.ca?.publicFileName ?? '',
         generation: row.ca?.generation ?? 1,
         fingerprintSha256: row.ca?.fingerprintSha256 ?? '',
+        deleted: Boolean(row.ca?.deletedAt),
       },
       status,
       statusLabel: certificateStatusLabel(status),
@@ -575,7 +592,11 @@ export class CertsService {
       );
     }
     const ca = await this.caService.findRecord(dto.caId);
-    const rows = await this.repo.find({ where: { caId: dto.caId }, relations: { ca: true }, order: { createdAt: 'DESC' } });
+    const rows = await this.repo.find({
+      where: { caId: dto.caId, deletedAt: IsNull() },
+      relations: { ca: true },
+      order: { createdAt: 'DESC' },
+    });
     return rows
       .map((row) => {
         row.ca = row.ca ?? ca;

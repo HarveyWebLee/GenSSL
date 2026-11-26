@@ -2,7 +2,7 @@ import { BadRequestException, Inject, Injectable } from '@nestjs/common';
 import { isForbiddenUploadName } from '../storage/upload-guard';
 import { decideHostKey } from './ssh-host-key';
 import { wrapSshError } from './ssh.errors';
-import { assertSafeRemoteDirectory, joinRemoteFile } from './ssh-path';
+import { assertSafeRemoteDirectory, joinRemoteFile, splitRemoteConfPath } from './ssh-path';
 import {
   SSH_CLIENT_FACTORY,
   type HostKeyInfo,
@@ -198,5 +198,35 @@ export class SshService {
       }
       return { exists: true, entries: await session.readdir(remotePath) };
     });
+  }
+
+  async writeRemoteFile(
+    options: SshOperationOptions & { remoteFilePath: string; body: string | Buffer; mode?: number },
+  ): Promise<SshOperationResult<{ path: string; size: number }>> {
+    const target = splitRemoteConfPath(options.remoteFilePath);
+    return this.withSession(options, async (session) => {
+      const directory = await session.stat(target.directory);
+      if (!directory) {
+        throw new BadRequestException(
+          `远程目录不存在：${target.directory}。请先在服务器上创建该目录，并确认账号有写权限。平台不会自动创建远程目录。`,
+        );
+      }
+      if (!directory.isDirectory) {
+        throw new BadRequestException(`远程路径「${target.directory}」不是目录。`);
+      }
+      const body = typeof options.body === 'string' ? Buffer.from(options.body, 'utf8') : options.body;
+      await session.writeFile(target.path, body, options.mode);
+      return { path: target.path, size: body.length };
+    });
+  }
+
+  async execCommand(
+    options: SshOperationOptions & { command: string },
+  ): Promise<SshOperationResult<{ exitCode: number | null; signal?: string; stdout: string; stderr: string }>> {
+    const command = options.command.trim();
+    if (!command) {
+      throw new BadRequestException('重启服务命令不能为空。');
+    }
+    return this.withSession(options, async (session) => session.exec(command));
   }
 }

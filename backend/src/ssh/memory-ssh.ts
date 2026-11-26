@@ -3,6 +3,7 @@ import { parseHostKeyInfo } from './ssh-host-key';
 import type {
   HostKeyInfo,
   RemoteDirEntry,
+  RemoteExecResult,
   RemoteStat,
   SshClientFactory,
   SshConnectInput,
@@ -42,6 +43,9 @@ export class MemorySshWorld {
   expectedPrivateKey?: string;
   connectError?: unknown;
   writeError?: unknown;
+  execError?: unknown;
+  execResult: RemoteExecResult = { exitCode: 0, stdout: '', stderr: '' };
+  executedCommands: string[] = [];
 
   hostKeyFor(host: string, port: number): Buffer {
     const key = `${host}:${port}`;
@@ -181,6 +185,14 @@ class MemorySshSession implements SshSession {
       throw new BadRequestException(`远程目录或文件不存在（${parent}）。请确认路径已创建，且填写的是绝对路径。`);
     }
     this.world.addFile(path, body, mode);
+  }
+
+  async exec(command: string): Promise<RemoteExecResult> {
+    this.world.executedCommands.push(command);
+    if (this.world.execError) {
+      throw this.world.execError;
+    }
+    return { ...this.world.execResult };
   }
 
   end(): void {

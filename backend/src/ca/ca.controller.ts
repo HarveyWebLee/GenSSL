@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Post,
@@ -68,6 +69,11 @@ export class CaController {
   @Post(':id/retire')
   retire(@Param('id') id: string) {
     return this.caService.retire(id);
+  }
+
+  @Delete(':id')
+  softDelete(@Param('id') id: string) {
+    return this.caService.softDelete(id);
   }
 
   @Get(':id')

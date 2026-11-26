@@ -11,7 +11,13 @@ import type {
   GenerateNginxPayload,
   IssueCertPayload,
   NginxConfigResult,
+  NginxReleaseDetail,
+  NginxRestartResult,
+  NginxServiceDetail,
+  NginxServiceSummary,
+  NginxServiceWritePayload,
   OverviewData,
+  PublishNginxServicePayload,
   RegenerateCaPayload,
   RegenerateCertPayload,
   RegenerateCertsBatchPayload,
@@ -52,6 +58,11 @@ export async function createCa(payload: CreateCaPayload): Promise<RootCaSummary>
 
 export async function retireCa(id: string): Promise<RootCaSummary> {
   const { data } = await http.post<RootCaSummary>(`/ca/${id}/retire`);
+  return data;
+}
+
+export async function deleteCa(id: string): Promise<{ ok: true; id: string; remainingCertificateCount: number }> {
+  const { data } = await http.delete<{ ok: true; id: string; remainingCertificateCount: number }>(`/ca/${id}`);
   return data;
 }
 
@@ -101,6 +112,11 @@ export async function regenerateCert(id: string, payload: RegenerateCertPayload 
     payload,
     { timeout },
   );
+  return data;
+}
+
+export async function deleteCert(id: string): Promise<{ ok: true; id: string }> {
+  const { data } = await http.delete<{ ok: true; id: string }>(`/certs/${id}`);
   return data;
 }
 
@@ -213,6 +229,97 @@ export async function downloadStoredObject(key: string): Promise<string> {
 export async function generateNginxConfig(payload: GenerateNginxPayload): Promise<NginxConfigResult> {
   const { data } = await http.post<NginxConfigResult>('/nginx/config', payload);
   return data;
+}
+
+export async function listNginxServices(serverId?: string): Promise<{ items: NginxServiceSummary[] }> {
+  const { data } = await http.get<{ items: NginxServiceSummary[] }>('/nginx/services', {
+    params: serverId ? { serverId } : undefined,
+  });
+  return data;
+}
+
+export async function getNginxService(id: string): Promise<NginxServiceDetail> {
+  const { data } = await http.get<NginxServiceDetail>(`/nginx/services/${id}`);
+  return data;
+}
+
+export async function createNginxService(
+  payload: NginxServiceWritePayload & {
+    serverId: string;
+    name: string;
+    port: number;
+    configPath: string;
+    configText: string;
+    restartCommand: string;
+  },
+): Promise<NginxServiceDetail> {
+  const { data } = await http.post<NginxServiceDetail>('/nginx/services', payload);
+  return data;
+}
+
+export async function updateNginxService(id: string, payload: NginxServiceWritePayload): Promise<NginxServiceDetail> {
+  const { data } = await http.patch<NginxServiceDetail>(`/nginx/services/${id}`, payload);
+  return data;
+}
+
+export async function deleteNginxService(id: string): Promise<{ ok: true; id: string }> {
+  const { data } = await http.delete<{ ok: true; id: string }>(`/nginx/services/${id}`);
+  return data;
+}
+
+export async function publishNginxService(id: string, payload: PublishNginxServicePayload): Promise<NginxReleaseDetail> {
+  const { data } = await http.post<NginxReleaseDetail>(`/nginx/services/${id}/publish`, payload);
+  return data;
+}
+
+export async function restartNginxService(id: string, trustHostKey?: boolean): Promise<NginxRestartResult> {
+  const { data } = await http.post<NginxRestartResult>(`/nginx/services/${id}/restart`, { trustHostKey });
+  return data;
+}
+
+export async function listNginxReleases(serviceId: string): Promise<{ items: NginxReleaseDetail[] }> {
+  const { data } = await http.get<{ items: NginxReleaseDetail[] }>(`/nginx/services/${serviceId}/releases`);
+  return data;
+}
+
+export async function getNginxRelease(serviceId: string, releaseId: string): Promise<NginxReleaseDetail> {
+  const { data } = await http.get<NginxReleaseDetail>(`/nginx/services/${serviceId}/releases/${releaseId}`);
+  return data;
+}
+
+export async function updateNginxRelease(
+  serviceId: string,
+  releaseId: string,
+  remark: string,
+): Promise<NginxReleaseDetail> {
+  const { data } = await http.patch<NginxReleaseDetail>(`/nginx/services/${serviceId}/releases/${releaseId}`, { remark });
+  return data;
+}
+
+export async function deleteNginxRelease(serviceId: string, releaseId: string): Promise<{ ok: true; id: string }> {
+  const { data } = await http.delete<{ ok: true; id: string }>(`/nginx/services/${serviceId}/releases/${releaseId}`);
+  return data;
+}
+
+export async function republishNginxRelease(
+  serviceId: string,
+  releaseId: string,
+  trustHostKey?: boolean,
+): Promise<NginxReleaseDetail> {
+  const { data } = await http.post<NginxReleaseDetail>(
+    `/nginx/services/${serviceId}/releases/${releaseId}/republish`,
+    { trustHostKey },
+  );
+  return data;
+}
+
+export async function downloadNginxRelease(serviceId: string, releaseId: string, fallbackName: string): Promise<string> {
+  return downloadBinary(
+    `/nginx/services/${serviceId}/releases/${releaseId}/download`,
+    {},
+    fallbackName,
+    '下载配置文件失败',
+  );
 }
 
 export async function getWindowsTrustGuide(caId?: string): Promise<WindowsTrustGuide> {

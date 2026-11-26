@@ -7,6 +7,7 @@ import { CertsPage } from './pages/CertsPage';
 import { ServersPage } from './pages/ServersPage';
 import { DeployPage } from './pages/DeployPage';
 import { NginxPage } from './pages/NginxPage';
+import { NginxServicePage } from './pages/NginxServicePage';
 import { GuidePage } from './pages/GuidePage';
 import { ArchivePage } from './pages/ArchivePage';
 
@@ -23,6 +24,7 @@ export default function App() {
           <Route path="/servers" element={<ServersPage />} />
           <Route path="/deploy" element={<DeployPage />} />
           <Route path="/nginx" element={<NginxPage />} />
+          <Route path="/nginx/:id" element={<NginxServicePage />} />
           <Route path="/guide" element={<GuidePage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>

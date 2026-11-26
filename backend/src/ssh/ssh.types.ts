@@ -42,10 +42,18 @@ export interface RemoteDirEntry {
   mtime?: Date;
 }
 
+export interface RemoteExecResult {
+  exitCode: number | null;
+  signal?: string;
+  stdout: string;
+  stderr: string;
+}
+
 export interface SshSession {
   stat(remotePath: string): Promise<RemoteStat | null>;
   readdir(remotePath: string): Promise<RemoteDirEntry[]>;
   writeFile(remotePath: string, body: Buffer | string, mode?: number): Promise<void>;
+  exec(command: string): Promise<RemoteExecResult>;
   end(): void;
 }
 

@@ -1,11 +1,32 @@
 import { randomUUID } from 'node:crypto';
+import { FindOperator } from 'typeorm';
 
 type EntityBase = { id: string; createdAt?: Date; updatedAt?: Date };
+
+function matchValue(actual: unknown, expected: unknown): boolean {
+  if (expected instanceof FindOperator) {
+    const type = expected.type;
+    if (type === 'isNull') {
+      return actual === null || actual === undefined;
+    }
+    if (type === 'not') {
+      return !matchValue(actual, expected.value);
+    }
+    if (type === 'equal') {
+      return actual === expected.value;
+    }
+    if (type === 'in') {
+      return Array.isArray(expected.value) && expected.value.includes(actual);
+    }
+    return false;
+  }
+  return actual === expected;
+}
 
 function matchesWhere<T extends EntityBase>(row: T, where: Record<string, unknown> | Record<string, unknown>[]): boolean {
   const clauses = Array.isArray(where) ? where : [where];
   return clauses.some((clause) =>
-    Object.entries(clause).every(([key, value]) => (row as Record<string, unknown>)[key] === value),
+    Object.entries(clause).every(([key, value]) => matchValue((row as Record<string, unknown>)[key], value)),
   );
 }
 

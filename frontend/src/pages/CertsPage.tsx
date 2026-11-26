@@ -21,12 +21,20 @@ import { PlusOutlined } from '@ant-design/icons';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import dayjs from 'dayjs';
 import { getApiErrorMessage } from '../api/http';
-import { downloadIssuedCert, getCertDetail, listCerts, regenerateCert, regenerateCertsBatch } from '../api/ssl';
+import { deleteCert, downloadIssuedCert, getCertDetail, listCerts, regenerateCert, regenerateCertsBatch } from '../api/ssl';
 import type { CertificateDetail, CertificateLifecycleStatus, CertificateSummary } from '../api/types';
 import { DisabledHint } from '../components/DisabledHint';
 import { PageHeader } from '../components/PageHeader';
 import { MAX_CERT_VALIDITY_DAYS } from '../utils/cert-validity';
 import { certStatusColor, REGENERATE_DISABLED_REASON } from '../utils/cert-status';
+
+const CA_DELETED_REASON = '所属根证书已从列表中删除，不能再重新生成或部署。';
+
+function regenerateDisabledReason(row: { ca: { status: string; deleted?: boolean } }): string | undefined {
+  if (row.ca.deleted) return CA_DELETED_REASON;
+  if (row.ca.status === 'retired') return REGENERATE_DISABLED_REASON;
+  return undefined;
+}
 
 function ValidityTag({ ok, label }: { ok: boolean; label: string }) {
   return <Tag color={ok ? 'success' : 'error'}>{label}</Tag>;
@@ -107,6 +115,19 @@ export function CertsPage() {
     onError: (error) => message.error(getApiErrorMessage(error, '重新生成并覆盖失败')),
   });
 
+  const deleteMutation = useMutation({
+    mutationFn: deleteCert,
+    onSuccess: async (_data, id) => {
+      await invalidateCertQueries();
+      message.success('签发证书已从列表中移除。证书库档案仍保留，这是假删除。');
+      if (selectedId === id) {
+        setParamValue('id');
+        setDetail(null);
+      }
+    },
+    onError: (error) => message.error(getApiErrorMessage(error, '删除失败')),
+  });
+
   const batchMutation = useMutation({
     mutationFn: (payload: { ids?: string[]; caId?: string }) => regenerateCertsBatch(payload),
     onSuccess: async (result) => {
@@ -142,7 +163,23 @@ export function CertsPage() {
     });
   };
 
+  const confirmDeleteCert = (row: CertificateSummary) => {
+    modal.confirm({
+      title: `删除签发证书「${row.name}」？`,
+      content:
+        '这是假删除：页面上将不再显示该证书，不能再下载或部署，证书库中的档案仍会保留。删除后，同一根下可以使用相同名称再签发新的证书。',
+      okText: '确认删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: () => deleteMutation.mutateAsync(row.id),
+    });
+  };
+
   const openRegenerate = (row: CertificateSummary) => {
+    if (row.ca.deleted) {
+      message.error(CA_DELETED_REASON);
+      return;
+    }
     if (row.ca.status === 'retired') {
       message.error('所属根证书已停用，不能重新生成。请改用一棵启用中的根证书重新签发。');
       return;
@@ -190,7 +227,7 @@ export function CertsPage() {
       render: (_: string, row) => (
         <div>
           <div>{row.ca.name || '—'}</div>
-          {row.ca.status === 'retired' ? <Tag>根已停用</Tag> : null}
+          {row.ca.deleted ? <Tag color="error">所属根已删除</Tag> : row.ca.status === 'retired' ? <Tag>根已停用</Tag> : null}
           {row.status === 'needs_regenerate' ? <Tag color="error">根已覆盖</Tag> : null}
         </div>
       ),
@@ -226,11 +263,11 @@ export function CertsPage() {
           <Button type="link" size="small" onClick={() => setParamValue('id', row.id)}>
             详情
           </Button>
-          <DisabledHint title={row.ca.status === 'retired' ? REGENERATE_DISABLED_REASON : undefined}>
+          <DisabledHint title={regenerateDisabledReason(row)}>
             <Button
               type="link"
               size="small"
-              disabled={row.ca.status === 'retired'}
+              disabled={Boolean(regenerateDisabledReason(row))}
               onClick={() => openRegenerate(row)}
             >
               重新生成并覆盖
@@ -238,6 +275,9 @@ export function CertsPage() {
           </DisabledHint>
           <Button type="link" size="small" onClick={() => download.mutate({ id: row.id, part: 'bundle' })}>
             部署包
+          </Button>
+          <Button type="link" size="small" danger onClick={() => confirmDeleteCert(row)}>
+            删除
           </Button>
         </Space>
       ),
@@ -348,8 +388,8 @@ export function CertsPage() {
               selectedRowKeys,
               onChange: (keys) => setSelectedRowKeys(keys),
               getCheckboxProps: (row) => ({
-                disabled: row.ca.status === 'retired',
-                title: row.ca.status === 'retired' ? REGENERATE_DISABLED_REASON : undefined,
+                disabled: Boolean(regenerateDisabledReason(row)),
+                title: regenerateDisabledReason(row),
               }),
             }}
           />
@@ -417,7 +457,7 @@ export function CertsPage() {
               </Descriptions.Item>
               <Descriptions.Item label="所属根证书">
                 {detail.ca.name}
-                {detail.ca.status === 'retired' ? '（已停用）' : ''}
+                {detail.ca.deleted ? '（已删除）' : detail.ca.status === 'retired' ? '（已停用）' : ''}
               </Descriptions.Item>
               <Descriptions.Item label="列表记录名">{detail.name}</Descriptions.Item>
               <Descriptions.Item label="证书主体名称">{detail.commonName}</Descriptions.Item>
@@ -433,9 +473,9 @@ export function CertsPage() {
               <Descriptions.Item label="私钥文件名">{detail.keyFileName}</Descriptions.Item>
             </Descriptions>
             <Space wrap>
-              <DisabledHint title={detail.ca.status === 'retired' ? REGENERATE_DISABLED_REASON : undefined}>
+              <DisabledHint title={regenerateDisabledReason(detail)}>
                 <Button
-                  disabled={detail.ca.status === 'retired'}
+                  disabled={Boolean(regenerateDisabledReason(detail))}
                   onClick={() => openRegenerate(detail)}
                   loading={regenMutation.isPending}
                 >
@@ -447,11 +487,14 @@ export function CertsPage() {
               <Button onClick={() => download.mutate({ id: detail.id, part: 'bundle' })}>
                 下载 Nginx 部署包
               </Button>
-              {detail.status === 'valid' ? (
+              {detail.status === 'valid' && !detail.ca.deleted ? (
                 <Button type="primary" onClick={() => navigate('/deploy')}>
                   去重新上传部署
                 </Button>
               ) : null}
+              <Button danger onClick={() => confirmDeleteCert(detail)} loading={deleteMutation.isPending}>
+                删除此证书
+              </Button>
             </Space>
             <Alert
               type="warning"

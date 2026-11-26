@@ -10,7 +10,10 @@ import {
 import { RootCaEntity } from '../ca/root-ca.entity';
 
 @Entity('issued_certificates')
-@Index(['caId', 'name'], { unique: true })
+@Index('UQ_issued_certificates_ca_name_active', ['caId', 'name'], {
+  unique: true,
+  where: '"deletedAt" IS NULL',
+})
 export class IssuedCertificateEntity {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -89,6 +92,10 @@ export class IssuedCertificateEntity {
 
   @Column({ type: 'timestamptz', nullable: true })
   archiveUploadedAt!: Date | null;
+
+  /** 软删除时间；有值表示已从管理界面隐藏，证书库档案仍保留。 */
+  @Column({ type: 'timestamptz', nullable: true })
+  deletedAt!: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

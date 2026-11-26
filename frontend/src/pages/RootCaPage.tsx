@@ -25,7 +25,7 @@ import { DownloadOutlined, PlusOutlined } from '@ant-design/icons';
 import dayjs, { type Dayjs } from 'dayjs';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { getApiErrorMessage } from '../api/http';
-import { archiveCa, createCa, downloadCaCert, listCas, regenerateCa, retireCa } from '../api/ssl';
+import { archiveCa, createCa, deleteCa, downloadCaCert, listCas, regenerateCa, retireCa } from '../api/ssl';
 import type {
   CaCertFormat,
   CaHashAlgorithm,
@@ -147,6 +147,22 @@ export function RootCaPage() {
     onError: (error) => message.error(getApiErrorMessage(error, '创建根证书失败')),
   });
 
+  const deleteMutation = useMutation({
+    mutationFn: deleteCa,
+    onSuccess: async (_data, id) => {
+      await queryClient.invalidateQueries({ queryKey: ['cas'] });
+      await queryClient.invalidateQueries({ queryKey: ['certs'] });
+      await queryClient.invalidateQueries({ queryKey: ['overview'] });
+      await queryClient.invalidateQueries({ queryKey: ['archive'] });
+      await queryClient.invalidateQueries({ queryKey: ['guide'] });
+      message.success('根证书已从列表中移除。私钥、历史和证书库档案仍保留，下属未删除的签发证书不会被一并删除。');
+      if (selectedId === id) {
+        setParams({});
+      }
+    },
+    onError: (error) => message.error(getApiErrorMessage(error, '删除失败')),
+  });
+
   const retireMutation = useMutation({
     mutationFn: retireCa,
     onSuccess: async () => {
@@ -211,6 +227,20 @@ export function RootCaPage() {
     };
     if (values.notBefore) payload.notBefore = values.notBefore.toISOString();
     regenMutation.mutate(payload);
+  };
+
+  const confirmDelete = (row: RootCaSummary) => {
+    const extra = row.certificateCount
+      ? `该根下仍有 ${row.certificateCount} 张未删除的签发证书。删除不会把这些证书一并删掉；它们仍会留在证书列表中，但无法再使用此根签发、重新生成或部署。`
+      : '当前没有未删除的下属签发证书。';
+    modal.confirm({
+      title: `删除根证书「${row.name}」？`,
+      content: `${extra}这是假删除：页面上将不再显示该根，私钥、历史记录和证书库档案都会保留。删除后可以使用相同名称再创建一棵新的根证书。`,
+      okText: '确认删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: () => deleteMutation.mutateAsync(row.id),
+    });
   };
 
   const confirmRetire = (row: RootCaSummary) => {
@@ -370,16 +400,21 @@ export function RootCaPage() {
                 </Button>
               </Space>
             </Card>
-            {selected.status === 'active' ? (
-              <Space wrap>
-                <Button onClick={() => openRegenerate(selected)} loading={regenMutation.isPending}>
-                  重新生成并覆盖
-                </Button>
-                <Button danger onClick={() => confirmRetire(selected)} loading={retireMutation.isPending}>
-                  停用此根证书
-                </Button>
-              </Space>
-            ) : null}
+            <Space wrap>
+              {selected.status === 'active' ? (
+                <>
+                  <Button onClick={() => openRegenerate(selected)} loading={regenMutation.isPending}>
+                    重新生成并覆盖
+                  </Button>
+                  <Button danger onClick={() => confirmRetire(selected)} loading={retireMutation.isPending}>
+                    停用此根证书
+                  </Button>
+                </>
+              ) : null}
+              <Button danger onClick={() => confirmDelete(selected)} loading={deleteMutation.isPending}>
+                删除此根证书
+              </Button>
+            </Space>
             {selected.status === 'active' ? <NextStepCard after="ca" /> : null}
           </Space>
         ) : null}

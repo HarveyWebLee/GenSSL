@@ -10,7 +10,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import * as forge from 'node-forge';
-import { Repository } from 'typeorm';
+import { IsNull, type FindOptionsWhere, Repository } from 'typeorm';
 import {
   buildContentDisposition,
   buildDefaultPublicFileName,
@@ -90,8 +90,8 @@ export class CaService {
   ) {}
 
   async list(): Promise<{ items: RootCaSummary[]; activeCount: number; retiredCount: number }> {
-    const rows = await this.repo.find({ order: { createdAt: 'DESC' } });
-    const certs = await this.certRepo.find();
+    const rows = await this.repo.find({ where: this.activeWhere(), order: { createdAt: 'DESC' } });
+    const certs = await this.certRepo.find({ where: { deletedAt: IsNull() } });
     const items = rows.map((row) => this.toSummary(row, certs.filter((cert) => cert.caId === row.id)));
     return {
       items,
@@ -111,7 +111,7 @@ export class CaService {
     if (!name) {
       throw new BadRequestException('请填写根证书名称。');
     }
-    const existing = await this.repo.findOne({ where: { name } });
+    const existing = await this.repo.findOne({ where: this.activeWhere({ name }) });
     if (existing) {
       throw new ConflictException(
         `根证书「${name}」已存在。如需轮换，请另建一棵新的根证书；若要覆盖这一棵，请使用「重新生成并覆盖」。`,
@@ -311,7 +311,12 @@ export class CaService {
   }
 
   async loadSigningMaterial(caId: string): Promise<CaSigningMaterial & { cert: forge.pki.Certificate; key: forge.pki.rsa.PrivateKey }> {
-    const row = await this.findRecord(caId, { withPrivateKey: true });
+    const row = await this.findRecord(caId, { withPrivateKey: true, includeDeleted: true });
+    if (row.deletedAt) {
+      throw new BadRequestException(
+        `根证书「${row.name}」已删除，不能再签发或重新生成服务器证书。`,
+      );
+    }
     if (row.status === 'retired') {
       throw new BadRequestException(
         `根证书「${row.name}」已停用，不能再签发或重新生成服务器证书。请改用一棵启用中的根证书。`,
@@ -341,7 +346,7 @@ export class CaService {
   }
 
   async loadPublicMaterial(caId: string): Promise<{ row: RootCaEntity; cert: forge.pki.Certificate; certPem: string }> {
-    const row = await this.findRecord(caId);
+    const row = await this.findRecord(caId, { includeDeleted: true });
     try {
       return {
         row,
@@ -386,14 +391,27 @@ export class CaService {
   }
 
   async countActive(): Promise<number> {
-    return this.repo.count({ where: { status: 'active' } });
+    return this.repo.count({ where: this.activeWhere({ status: 'active' }) });
   }
 
   async countAll(): Promise<number> {
-    return this.repo.count();
+    return this.repo.count({ where: this.activeWhere() });
   }
 
-  async findRecord(id: string, options?: { withPrivateKey?: boolean }): Promise<RootCaEntity> {
+  async softDelete(id: string): Promise<{ ok: true; id: string; remainingCertificateCount: number }> {
+    const row = await this.findRecord(id);
+    const remainingCertificateCount = await this.certRepo.count({
+      where: { caId: row.id, deletedAt: IsNull() },
+    });
+    row.deletedAt = new Date();
+    await this.repo.save(row);
+    return { ok: true, id: row.id, remainingCertificateCount };
+  }
+
+  async findRecord(
+    id: string,
+    options?: { withPrivateKey?: boolean; includeDeleted?: boolean },
+  ): Promise<RootCaEntity> {
     const row = options?.withPrivateKey
       ? await this.repo
           .createQueryBuilder('ca')
@@ -401,10 +419,14 @@ export class CaService {
           .where('ca.id = :id', { id })
           .getOne()
       : await this.repo.findOne({ where: { id } });
-    if (!row) {
+    if (!row || (row.deletedAt && !options?.includeDeleted)) {
       throw new NotFoundException('未找到该根证书。');
     }
     return row;
+  }
+
+  private activeWhere(where: FindOptionsWhere<RootCaEntity> = {}): FindOptionsWhere<RootCaEntity> {
+    return { ...where, deletedAt: IsNull() };
   }
 
   assertDtoHasNoPrivateKey(payload: object): void {

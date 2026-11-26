@@ -2,7 +2,18 @@ import { Injectable } from '@nestjs/common';
 import { Client, type SFTPWrapper } from 'ssh2';
 import { parseHostKeyInfo } from './ssh-host-key';
 import { isNotFoundError, wrapSftpError, wrapSshError } from './ssh.errors';
-import type { RemoteDirEntry, RemoteStat, SshClientFactory, SshConnectInput, SshSession } from './ssh.types';
+import type { RemoteDirEntry, RemoteExecResult, RemoteStat, SshClientFactory, SshConnectInput, SshSession } from './ssh.types';
+
+const MAX_EXEC_OUTPUT = 4000;
+
+function collectOutput(chunk: Buffer | string, current: string): string {
+  if (current.length >= MAX_EXEC_OUTPUT) {
+    return current;
+  }
+  const next = current + (typeof chunk === 'string' ? chunk : chunk.toString('utf8'));
+  return next.length > MAX_EXEC_OUTPUT ? `${next.slice(0, MAX_EXEC_OUTPUT)}
+…（输出已截断）` : next;
+}
 
 @Injectable()
 export class Ssh2ClientFactory implements SshClientFactory {
@@ -75,7 +86,7 @@ export class Ssh2ClientFactory implements SshClientFactory {
       });
     });
 
-    return new Ssh2Session(client, sftp);
+    return new Ssh2Session(client, sftp, { host: input.host, port: input.port });
   }
 }
 
@@ -83,6 +94,7 @@ class Ssh2Session implements SshSession {
   constructor(
     private readonly client: Client,
     private readonly sftp: SFTPWrapper,
+    private readonly context: { host: string; port: number },
   ) {}
 
   async stat(remotePath: string): Promise<RemoteStat | null> {
@@ -157,6 +169,44 @@ class Ssh2Session implements SshSession {
       stream.once('error', onError);
       stream.once('close', onClose);
       stream.end(data);
+    });
+  }
+
+  async exec(command: string): Promise<RemoteExecResult> {
+    return new Promise((resolve, reject) => {
+      this.client.exec(command, (error, stream) => {
+        if (error || !stream) {
+          try {
+            wrapSshError(error ?? new Error('无法在远程主机执行命令'), this.context);
+          } catch (wrapped) {
+            reject(wrapped);
+          }
+          return;
+        }
+        let stdout = '';
+        let stderr = '';
+        stream.on('data', (chunk: Buffer | string) => {
+          stdout = collectOutput(chunk, stdout);
+        });
+        stream.stderr.on('data', (chunk: Buffer | string) => {
+          stderr = collectOutput(chunk, stderr);
+        });
+        stream.on('close', (code: number | null, signal?: string) => {
+          resolve({
+            exitCode: typeof code === 'number' ? code : null,
+            signal,
+            stdout,
+            stderr,
+          });
+        });
+        stream.on('error', (streamError: unknown) => {
+          try {
+            wrapSshError(streamError, this.context);
+          } catch (wrapped) {
+            reject(wrapped);
+          }
+        });
+      });
     });
   }
 

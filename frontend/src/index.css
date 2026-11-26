@@ -498,3 +498,58 @@ pre,
 .ant-form-item-explain-error {
   font-size: 13px;
 }
+
+
+.nginx-editor.ant-input,
+.nginx-editor textarea,
+textarea.nginx-editor {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.65;
+  background: #f8fafc;
+  color: var(--ink);
+}
+
+.nginx-example-preview {
+  max-height: 280px;
+  overflow: auto;
+  padding: 12px 14px;
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.nginx-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.85fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.nginx-timeline .ant-timeline-item-content {
+  width: calc(100% - 8px);
+}
+
+.nginx-release {
+  padding-bottom: 4px;
+}
+
+.nginx-release-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.nginx-release-remark {
+  margin: 4px 0 6px;
+  color: var(--ink);
+  line-height: 1.6;
+}
+
+@media (max-width: 1100px) {
+  .nginx-detail-grid {
+    grid-template-columns: 1fr;
+  }
+}

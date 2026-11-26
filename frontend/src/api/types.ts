@@ -168,6 +168,7 @@ export interface CertificateCaRef {
   publicFileName: string;
   generation?: number;
   fingerprintSha256?: string;
+  deleted?: boolean;
 }
 
 export interface CertificateSummary {
@@ -454,4 +455,111 @@ export interface WindowsTrustGuide {
   cas: TrustCaRef[];
   steps: string[];
   warning: string;
+}
+
+export type NginxReleaseStatus = 'success' | 'failed' | 'partial';
+
+export interface NginxServiceArchive {
+  storageKind: 'nginx';
+  storageLabel: 'Nginx 配置管理副本';
+  uploaded: boolean;
+  objectKey: string | null;
+  uploadedAt: string | null;
+}
+
+export interface NginxServiceServerRef {
+  id: string;
+  name: string;
+  host: string | null;
+  sshPort: number;
+  sshUsername: string | null;
+  sshReady: boolean;
+  sshReadyReason: string | null;
+}
+
+export interface NginxReleaseSummary {
+  id: string;
+  version: string;
+  remark: string;
+  status: NginxReleaseStatus;
+  statusLabel: string;
+  publishedAt: string;
+  sourceReleaseId: string | null;
+  configPath: string;
+}
+
+export interface NginxServiceSummary {
+  id: string;
+  server: NginxServiceServerRef;
+  name: string;
+  port: number;
+  configPath: string;
+  restartCommand: string;
+  archive: NginxServiceArchive;
+  currentRelease: NginxReleaseSummary | null;
+  releaseCount: number;
+  createdAt: string;
+  updatedAt: string;
+  warning?: string;
+}
+
+export interface NginxServiceDetail extends NginxServiceSummary {
+  configText: string;
+}
+
+export interface NginxReleaseDetail {
+  id: string;
+  serviceId: string;
+  serviceName: string;
+  version: string;
+  remark: string;
+  configPath: string;
+  configText?: string;
+  sourceReleaseId: string | null;
+  sourceVersion: string | null;
+  status: NginxReleaseStatus;
+  statusLabel: string;
+  publishedAt: string;
+  written: boolean;
+  restartCommandUsed: string;
+  restartExecuted: boolean;
+  restartExitCode: number | null;
+  restartStdout: string | null;
+  restartStderr: string | null;
+  errorMessage: string | null;
+  rustfsSynced: boolean;
+  archive: NginxServiceArchive;
+  remote: {
+    host: string;
+    port: number;
+    username: string;
+    path: string;
+    destination: string;
+  } | null;
+  warning?: string;
+}
+
+export interface NginxServiceWritePayload {
+  serverId?: string;
+  name?: string;
+  port?: number;
+  configPath?: string;
+  configText?: string;
+  restartCommand?: string;
+}
+
+export interface PublishNginxServicePayload {
+  version: string;
+  remark: string;
+  trustHostKey?: boolean;
+}
+
+export interface NginxRestartResult {
+  ok: boolean;
+  command: string;
+  destination: string;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  message: string;
 }

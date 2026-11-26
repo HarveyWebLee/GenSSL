@@ -270,4 +270,60 @@ describe('CaService (multi-root, database only)', () => {
       (error: unknown) => error instanceof BadRequestException,
     );
   });
+
+  it('soft-deletes a root so it disappears from lists but keeps the private key, and allows reusing the name', async () => {
+    const { service, cas, certs } = createService();
+    const created = await service.create({ name: 'Soft-Delete-CA', keySize: 2048 });
+    certs.items.push({
+      id: '33333333-3333-4333-8333-333333333333',
+      caId: created.id,
+      name: 'kept-cert',
+      commonName: '10.0.0.1',
+      ips: ['10.0.0.1'],
+      dnsNames: [],
+      days: 30,
+      notBefore: new Date(),
+      notAfter: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      serialNumber: 'abc123',
+      fingerprintSha256: 'AA',
+      signatureAlgorithm: 'sha256WithRSAEncryption',
+      publicKeyBits: 2048,
+      subject: {},
+      publicFileName: 'kept.crt',
+      keyFileName: 'kept.key',
+      sanDisplay: 'IP:10.0.0.1',
+      caGeneration: 1,
+      issuerFingerprintSha256: created.fingerprintSha256,
+      certificatePem: 'PEM',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      deletedAt: null,
+    } as unknown as IssuedCertificateEntity);
+
+    const result = await service.softDelete(created.id);
+    assert.equal(result.ok, true);
+    assert.equal(result.remainingCertificateCount, 1);
+    assert.ok(cas.items[0]!.deletedAt);
+    assert.ok(cas.items[0]!.privateKeyPem.includes('PRIVATE KEY'));
+
+    const listed = await service.list();
+    assert.equal(listed.items.length, 0);
+    assert.equal(listed.activeCount, 0);
+    await assert.rejects(() => service.get(created.id), (error: unknown) => error instanceof NotFoundException);
+    await assert.rejects(
+      () => service.loadSigningMaterial(created.id),
+      (error: unknown) => {
+        assert.ok(error instanceof BadRequestException);
+        assert.match(String((error as BadRequestException).message), /已删除/);
+        return true;
+      },
+    );
+
+    const reused = await service.create({ name: 'Soft-Delete-CA', keySize: 2048 });
+    assert.notEqual(reused.id, created.id);
+    assert.equal((await service.list()).items.length, 1);
+    assert.equal(certs.items.length, 1);
+    assert.equal(certs.items[0]!.deletedAt, null);
+  });
+
 });
