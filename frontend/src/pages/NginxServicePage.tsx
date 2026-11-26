@@ -22,6 +22,7 @@ import {
 import {
   ArrowLeftOutlined,
   CloudUploadOutlined,
+  CopyOutlined,
   DeleteOutlined,
   DownloadOutlined,
   EditOutlined,
@@ -435,6 +436,9 @@ export function NginxServicePage() {
           <Space wrap>
             <Button icon={<CloudUploadOutlined />} type="primary" onClick={() => void openPublish()} loading={publishMutation.isPending}>
               发布新版本
+            </Button>
+            <Button icon={<CopyOutlined />} onClick={() => navigate(`/nginx/new?copyFrom=${encodeURIComponent(service.id)}`)}>
+              复制新建
             </Button>
             <Button icon={<ReloadOutlined />} onClick={confirmRestart} loading={restartMutation.isPending}>
               手动重启
