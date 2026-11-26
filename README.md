@@ -215,13 +215,35 @@ cp .env.production.example .env.production
 
 生产环境变量键名与开发一致。容器内后端连接数据库应使用 `POSTGRES_HOST=postgres`、`POSTGRES_PORT=5432`（不要用 19666）；RustFS 使用 `RUSTFS_ENDPOINT=http://rustfs:9000`（不要用 19701）。这些容器网络地址已在 `docker-compose.prod.yml` 中为后端写明，避免误用宿主机开发地址。
 
+数据目录默认绑定到项目下的相对路径，可在 `.env.production` 中修改：
+
+| 变量 | 默认值 | 容器内挂载点 |
+| --- | --- | --- |
+| `POSTGRES_DATA_PATH` | `./data/prod/postgres` | `/var/lib/postgresql/data` |
+| `RUSTFS_DATA_PATH` | `./data/prod/rustfs` | 父目录下的 `0`–`3` 分别对应 `/data/rustfs0`–`3` |
+| `RUSTFS_LOGS_PATH` | `./data/prod/rustfs-logs` | `/app/logs` |
+
+相对路径相对于 `docker-compose.prod.yml`（即项目根目录）。也可以改成绝对路径；在 Windows 上请使用正斜杠，例如：
+
+```env
+POSTGRES_DATA_PATH=D:/genssl-data/postgres
+RUSTFS_DATA_PATH=D:/genssl-data/rustfs
+RUSTFS_LOGS_PATH=D:/genssl-data/rustfs-logs
+```
+
+不要把这些变量留空。编排文件使用 `${VAR:-默认值}`，未设置或为空时会回退到上面的项目相对路径，而不会把 `${RUSTFS_DATA_PATH}/0` 解析成 `/0` 误挂到宿主机根目录。
+
+如果之前已经用 Docker 命名卷跑过生产栈，改成绑定挂载后**不会自动迁移旧数据**，新的宿主机目录一开始是空的。旧数据仍留在原先的命名卷中（可用 `docker volume ls` 查看，项目名为 `genssl-prod`），需要的话请自行备份或迁移后再切换。切换后 `npm run prod:down` 只会停止容器，数据保留在你配置的宿主机目录里。
+
+在 Windows（Docker Desktop）上把路径绑到 NTFS 目录时，权限和所有者表现可能和 Linux 宿主机不一样。生产编排仍会运行 RustFS 的 permission helper（`chown 10001`）；若 RustFS 因权限无法写入，可改把数据目录放到 Linux 文件系统或 WSL 发行版路径下再试。
+
 2. 构建并启动：
 
 ```bash
 docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
 ```
 
-或：`npm run prod:up`（同样读取 `.env.production`）。查看状态：`npm run prod:ps`。停止：`npm run prod:down`（默认保留数据卷）。
+或：`npm run prod:up`（同样读取 `.env.production`）。查看状态：`npm run prod:ps`。停止：`npm run prod:down`（默认保留你配置的宿主机数据目录）。
 
 3. 访问：
 

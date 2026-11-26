@@ -20,3 +20,6 @@ Thumbs.db
 # Local infrastructure data (named volumes are preferred; ignore bind dirs if used)
 docker-data/
 pgdata/
+
+# 生产环境默认绑定挂载目录（见 .env.production.example）
+/data/

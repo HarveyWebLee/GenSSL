@@ -7,6 +7,7 @@
 #   前端管理界面  18347 -> 容器内 Nginx 18347
 #   后端 API      19347 -> 容器内 NestJS 19347
 # Postgres、RustFS 默认不对宿主机暴露。
+# 数据目录默认绑定到项目下 ./data/prod/（可在 .env.production 中修改）。
 #
 # 本文件与本地 docker-compose.yml 相互独立：
 #   docker compose up -d / npm run infra:up 仍然只启动开发用基础设施。
@@ -21,8 +22,11 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-genssl}
       POSTGRES_USER: ${POSTGRES_USER:-genssl}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env.production 中设置 POSTGRES_PASSWORD}
+    # 宿主机路径由 POSTGRES_DATA_PATH 配置。使用 ${VAR:-默认值}：
+    # 未设置或为空时回退到项目相对路径，避免空值误挂到根目录。
+    # 相对路径相对于本文件（项目根目录）；也可写绝对路径，例如 D:/genssl-data/postgres。
     volumes:
-      - genssl_prod_pg_data:/var/lib/postgresql/data
+      - ${POSTGRES_DATA_PATH:-./data/prod/postgres}:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 5s
@@ -36,12 +40,14 @@ services:
   rustfs-volume-permission-helper:
     image: alpine:3.20
     container_name: genssl-prod-rustfs-perms
+    # 只需配置一个父目录 RUSTFS_DATA_PATH，自动使用其下 0/1/2/3 四个子目录。
+    # ${VAR:-默认值} 可防止变量为空时变成 /0 误挂到宿主机根目录。
     volumes:
-      - genssl_prod_rustfs_data_0:/data/rustfs0
-      - genssl_prod_rustfs_data_1:/data/rustfs1
-      - genssl_prod_rustfs_data_2:/data/rustfs2
-      - genssl_prod_rustfs_data_3:/data/rustfs3
-      - genssl_prod_rustfs_logs:/app/logs
+      - ${RUSTFS_DATA_PATH:-./data/prod/rustfs}/0:/data/rustfs0
+      - ${RUSTFS_DATA_PATH:-./data/prod/rustfs}/1:/data/rustfs1
+      - ${RUSTFS_DATA_PATH:-./data/prod/rustfs}/2:/data/rustfs2
+      - ${RUSTFS_DATA_PATH:-./data/prod/rustfs}/3:/data/rustfs3
+      - ${RUSTFS_LOGS_PATH:-./data/prod/rustfs-logs}:/app/logs
     command: >
       sh -c "
         chown -R 10001:10001 /data/rustfs0 /data/rustfs1 /data/rustfs2 /data/rustfs3 /app/logs &&
@@ -77,12 +83,14 @@ services:
       RUSTFS_OBS_LOG_DIRECTORY: /app/logs
       # 单机部署可用。不要把本服务暴露到公网。
       RUSTFS_UNSAFE_BYPASS_DISK_CHECK: ${RUSTFS_UNSAFE_BYPASS_DISK_CHECK:-true}
+    # 只需配置一个父目录 RUSTFS_DATA_PATH，自动使用其下 0/1/2/3 四个子目录。
+    # ${VAR:-默认值} 可防止变量为空时变成 /0 误挂到宿主机根目录。
     volumes:
-      - genssl_prod_rustfs_data_0:/data/rustfs0
-      - genssl_prod_rustfs_data_1:/data/rustfs1
-      - genssl_prod_rustfs_data_2:/data/rustfs2
-      - genssl_prod_rustfs_data_3:/data/rustfs3
-      - genssl_prod_rustfs_logs:/app/logs
+      - ${RUSTFS_DATA_PATH:-./data/prod/rustfs}/0:/data/rustfs0
+      - ${RUSTFS_DATA_PATH:-./data/prod/rustfs}/1:/data/rustfs1
+      - ${RUSTFS_DATA_PATH:-./data/prod/rustfs}/2:/data/rustfs2
+      - ${RUSTFS_DATA_PATH:-./data/prod/rustfs}/3:/data/rustfs3
+      - ${RUSTFS_LOGS_PATH:-./data/prod/rustfs-logs}:/app/logs
     healthcheck:
       test:
         [
@@ -165,11 +173,3 @@ services:
 networks:
   genssl-prod-network:
     name: genssl-prod-network
-
-volumes:
-  genssl_prod_pg_data:
-  genssl_prod_rustfs_data_0:
-  genssl_prod_rustfs_data_1:
-  genssl_prod_rustfs_data_2:
-  genssl_prod_rustfs_data_3:
-  genssl_prod_rustfs_logs:
