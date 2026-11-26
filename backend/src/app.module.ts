@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import path from 'node:path';
+import { postgresConnectionFromConfig } from './config/database.config';
 import { CaModule } from './ca/ca.module';
 import { CertsModule } from './certs/certs.module';
 import { DeployModule } from './deploy/deploy.module';
@@ -24,17 +25,22 @@ import { StorageModule } from './storage/storage.module';
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
-        type: 'postgres',
-        url:
-          config.get<string>('DATABASE_URL')?.trim() ||
-          'postgres://genssl:genssl@127.0.0.1:19666/genssl',
-        autoLoadEntities: true,
-        synchronize: config.get<string>('TYPEORM_SYNC', 'true') !== 'false',
-        logging: config.get<string>('TYPEORM_LOGGING') === 'true',
-        retryAttempts: 10,
-        retryDelay: 3000,
-      }),
+      useFactory: (config: ConfigService) => {
+        const postgres = postgresConnectionFromConfig(config);
+        return {
+          type: 'postgres' as const,
+          host: postgres.host,
+          port: postgres.port,
+          username: postgres.username,
+          password: postgres.password,
+          database: postgres.database,
+          autoLoadEntities: true,
+          synchronize: config.get<string>('TYPEORM_SYNC', 'true') !== 'false',
+          logging: config.get<string>('TYPEORM_LOGGING') === 'true',
+          retryAttempts: 10,
+          retryDelay: 3000,
+        };
+      },
     }),
     CaModule,
     CertsModule,

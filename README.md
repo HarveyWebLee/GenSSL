@@ -98,13 +98,13 @@ npm run dev
 
 也可分开展开：`npm run dev:backend` 与 `npm run dev:frontend`。
 
-后端连接：
+后端连接（与根目录 `.env.example` / `backend/.env.example` 使用同一套键名）：
 
-- PostgreSQL：`DATABASE_URL=postgres://genssl:genssl@127.0.0.1:19666/genssl`
-- RustFS：`RUSTFS_ENDPOINT=http://127.0.0.1:19701`（`forcePathStyle: true`）
+- PostgreSQL：`POSTGRES_HOST=127.0.0.1`、`POSTGRES_PORT=19666`、`POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD`（示例默认均为 `genssl`）。这些键与 docker compose 中的库名、用户和密码一致。`POSTGRES_PORT` 是后端连接的主机映射端口，不要把它传给 postgres 容器当作服务端口（容器内仍是 5432，映射仍是 `19666:5432`）。仍兼容 `DATABASE_URL`；若与 `POSTGRES_*` 同时存在，以 `POSTGRES_*` 为准。
+- RustFS：`RUSTFS_ENDPOINT=http://127.0.0.1:19701`（`forcePathStyle: true`），以及 `RUSTFS_REGION`、`RUSTFS_BUCKET`、`RUSTFS_ACCESS_KEY`、`RUSTFS_SECRET_KEY`
 - 启动时自动创建存储桶 `RUSTFS_BUCKET`（默认 `genssl`）
 - 表结构：默认 `TYPEORM_SYNC=true`，启动时自动同步。生产环境可改为 `false` 并自行管理结构。
-- SSH 凭据加密：`GENSSL_SSH_CREDENTIAL_KEY`（推荐 64 位十六进制）。本地开发未设置时使用内置开发默认值；生产环境或 `GENSSL_STRICT_SECRETS=true` 时必须配置，否则测试连接和上传部署会失败。
+- SSH 凭据加密：`GENSSL_SSH_CREDENTIAL_KEY`（推荐 64 位十六进制）。示例文件写出了开发用示例值，生产必须换成自己的密钥。本地开发未设置时仍可使用内置开发默认值；生产环境或 `GENSSL_STRICT_SECRETS=true` 时必须配置，否则测试连接和上传部署会失败。
 
 ## 推荐操作步骤
 
